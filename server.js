@@ -53,62 +53,113 @@ async function fetchOdds() {
 }
 
 // ================================
-// 🧠 AI Model — Game Predictions
+// 🧠 Enhanced LockBox AI Model v2
 // ================================
-function generateAIGamePicks(games) {
-  return games
-    .map((g) => {
-      const home = g.home_team;
-      const away = g.away_team;
-      const markets = g.bookmakers?.[0]?.markets || [];
-      const bookmaker = g.bookmakers?.[0]?.title || "Unknown";
+async function generateAIGamePicks(games) {
+  try {
+    // Pull extra context data (injuries, weather, past stats)
+    const [weatherData, injuriesData] = await Promise.all([
+      axios
+        .get("https://nflweather.com/api/v1/games?week=current")
+        .catch(() => ({ data: [] })),
+      axios
+        .get("https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries")
+        .catch(() => ({ data: {} })),
+    ]);
 
-      // === MONEYLINE
-      const h2h = markets.find((m) => m.key === "h2h");
-      const homeML = h2h?.outcomes?.find((o) => o.name === home)?.price;
-      const awayML = h2h?.outcomes?.find((o) => o.name === away)?.price;
-      let mlPick = null;
-      if (homeML && awayML) {
+    return games
+      .map((g) => {
+        const home = g.home_team;
+        const away = g.away_team;
+        const bookmaker = g.bookmakers?.[0]?.title || "Unknown";
+        const markets = g.bookmakers?.[0]?.markets || [];
+
+        // --- MONEYLINE
+        const h2h = markets.find((m) => m.key === "h2h");
+        const homeML = h2h?.outcomes?.find((o) => o.name === home)?.price;
+        const awayML = h2h?.outcomes?.find((o) => o.name === away)?.price;
+
+        // --- SPREAD
+        const spread = markets.find((m) => m.key === "spreads");
+        const homeSpread = spread?.outcomes?.find((o) => o.name === home);
+        const awaySpread = spread?.outcomes?.find((o) => o.name === away);
+
+        if (!homeML || !awayML) return null;
+
+        // --- Base implied probability
         const homeProb = impliedProb(homeML);
         const awayProb = impliedProb(awayML);
+        const edge = Math.abs(homeProb - awayProb);
+
+        // --- Weather impact
+        const weatherImpact = weatherData.data?.find(
+          (w) =>
+            w.home_team === home ||
+            w.away_team === away
+        );
+        const weatherAdj =
+          weatherImpact && /rain|snow|wind/i.test(weatherImpact.weather)
+            ? -0.05
+            : 0;
+
+        // --- Injury impact (using ESPN API)
+        const teamInjuries =
+          injuriesData.sports?.[0]?.leagues?.[0]?.teams?.filter((t) =>
+            [home, away].some((n) => t.team.displayName.includes(n))
+          ) || [];
+        const injuryAdj = Math.max(
+          -0.1,
+          -0.02 * teamInjuries.length
+        );
+
+        // --- Moneyline Confidence (balanced model)
+        const mlConfidence = Math.round(
+          50 + (edge * 100 + weatherAdj * 50 + injuryAdj * 100)
+        );
         const pick = homeProb > awayProb ? home : away;
-        const confidence = Math.round(50 + Math.abs(homeProb - awayProb) * 100);
-        mlPick = { type: "moneyline", pick, confidence, homeML, awayML };
-      }
 
-      // === SPREAD
-      const spread = markets.find((m) => m.key === "spreads");
-      let spreadPick = null;
-      if (spread?.outcomes?.length === 2) {
-        const homeSpread = spread.outcomes.find((o) => o.name === home);
-        const awaySpread = spread.outcomes.find((o) => o.name === away);
+        // --- Spread Confidence (dynamic using price + edge)
+        let spreadConfidence = 50;
         if (homeSpread && awaySpread) {
-          const spreadEdge = Math.abs(homeSpread.point - awaySpread.point);
-          const pick =
-            Math.abs(homeSpread.price) < Math.abs(awaySpread.price)
-              ? home
-              : away;
-          const confidence = Math.min(100, 60 + spreadEdge * 10);
-          spreadPick = {
-            type: "spread",
-            pick,
-            confidence,
-            homeSpread,
-            awaySpread,
-          };
+          const priceEdge =
+            Math.abs(homeSpread.price - awaySpread.price) / 100;
+          const pointEdge = Math.abs(homeSpread.point - awaySpread.point);
+          spreadConfidence = Math.min(
+            95,
+            55 + edge * 80 + priceEdge * 10 + pointEdge * 2
+          );
         }
-      }
 
-      if (!mlPick && !spreadPick) return null;
-
-      return {
-        matchup: `${away} @ ${home}`,
-        bookmaker,
-        mlPick,
-        spreadPick,
-      };
-    })
-    .filter(Boolean);
+        return {
+          matchup: `${away} @ ${home}`,
+          bookmaker,
+          mlPick: {
+            type: "moneyline",
+            pick,
+            confidence: Math.max(55, Math.min(mlConfidence, 95)),
+            homeML,
+            awayML,
+          },
+          spreadPick:
+            homeSpread && awaySpread
+              ? {
+                  type: "spread",
+                  pick:
+                    Math.abs(homeSpread.price) < Math.abs(awaySpread.price)
+                      ? home
+                      : away,
+                  confidence: spreadConfidence.toFixed(1),
+                  homeSpread,
+                  awaySpread,
+                }
+              : null,
+        };
+      })
+      .filter(Boolean);
+  } catch (err) {
+    console.error("❌ Enhanced AI model error:", err.message);
+    return [];
+  }
 }
 
 // ================================

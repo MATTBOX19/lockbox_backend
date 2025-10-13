@@ -18,7 +18,7 @@ const RESULT_LOG = "./results.json";
 const SPORT = "americanfootball_nfl";
 const REGIONS = "us";
 const MARKETS = "h2h,spreads,totals";
-const ODDS_CACHE_MS = 5 * 60 * 1000; // 5 minutes
+const ODDS_CACHE_MS = 5 * 60 * 1000;
 
 let record = { wins: 0, losses: 0, winRate: 0 };
 if (fs.existsSync(RESULT_LOG)) {
@@ -53,37 +53,112 @@ async function fetchOdds() {
 }
 
 // ================================
-// 🧠 AI Picks (Moneyline only for now)
+// 🧠 AI Model — Game Predictions
 // ================================
-function generateAIPicks(games) {
+function generateAIGamePicks(games) {
   return games
     .map((g) => {
       const home = g.home_team;
       const away = g.away_team;
       const markets = g.bookmakers?.[0]?.markets || [];
+      const bookmaker = g.bookmakers?.[0]?.title || "Unknown";
+
+      // === MONEYLINE
       const h2h = markets.find((m) => m.key === "h2h");
-      if (!h2h) return null;
+      const homeML = h2h?.outcomes?.find((o) => o.name === home)?.price;
+      const awayML = h2h?.outcomes?.find((o) => o.name === away)?.price;
+      let mlPick = null;
+      if (homeML && awayML) {
+        const homeProb = impliedProb(homeML);
+        const awayProb = impliedProb(awayML);
+        const pick = homeProb > awayProb ? home : away;
+        const confidence = Math.round(50 + Math.abs(homeProb - awayProb) * 100);
+        mlPick = { type: "moneyline", pick, confidence, homeML, awayML };
+      }
 
-      const homeML = h2h.outcomes.find((o) => o.name === home)?.price;
-      const awayML = h2h.outcomes.find((o) => o.name === away)?.price;
-      if (!homeML || !awayML) return null;
+      // === SPREAD
+      const spread = markets.find((m) => m.key === "spreads");
+      let spreadPick = null;
+      if (spread?.outcomes?.length === 2) {
+        const homeSpread = spread.outcomes.find((o) => o.name === home);
+        const awaySpread = spread.outcomes.find((o) => o.name === away);
+        if (homeSpread && awaySpread) {
+          const spreadEdge = Math.abs(homeSpread.point - awaySpread.point);
+          const pick =
+            Math.abs(homeSpread.price) < Math.abs(awaySpread.price)
+              ? home
+              : away;
+          const confidence = Math.min(100, 60 + spreadEdge * 10);
+          spreadPick = {
+            type: "spread",
+            pick,
+            confidence,
+            homeSpread,
+            awaySpread,
+          };
+        }
+      }
 
-      const homeProb = impliedProb(homeML);
-      const awayProb = impliedProb(awayML);
-      const pick = homeProb > awayProb ? home : away;
-      const confidence = Math.round(Math.abs(homeProb - awayProb) * 100);
+      if (!mlPick && !spreadPick) return null;
 
       return {
         matchup: `${away} @ ${home}`,
-        pick,
-        confidence,
-        homeML,
-        awayML,
-        bookmaker: g.bookmakers?.[0]?.title || "Unknown",
-        type: "moneyline",
+        bookmaker,
+        mlPick,
+        spreadPick,
       };
     })
     .filter(Boolean);
+}
+
+// ================================
+// 🧩 AI Player Prop Picks
+// ================================
+async function generateAIPropPicks() {
+  try {
+    const url = `https://api.the-odds-api.com/v4/sports/${SPORT}/odds`;
+    const params = {
+      apiKey: ODDS_API_KEY,
+      regions: REGIONS,
+      markets:
+        "player_pass_yds,player_rush_yds,player_rec_yds,player_receptions",
+      oddsFormat: "american",
+      dateFormat: "iso",
+    };
+    const { data } = await axios.get(url, { params });
+
+    const props = [];
+    data.forEach((game) => {
+      const markets = game.bookmakers?.[0]?.markets || [];
+      markets.forEach((m) => {
+        m.outcomes?.forEach((o) => {
+          const confidence = Math.max(
+            50,
+            100 - Math.abs(o.price) / 10 // higher odds = lower confidence
+          );
+          props.push({
+            matchup: `${game.away_team} @ ${game.home_team}`,
+            player: o.name,
+            market: m.key,
+            price: o.price,
+            point: o.point,
+            confidence,
+            bookmaker: game.bookmakers?.[0]?.title || "Unknown",
+          });
+        });
+      });
+    });
+
+    console.log(`🎯 Generated ${props.length} prop picks`);
+    return props;
+  } catch (err) {
+    if (err.response?.status === 422) {
+      console.warn("⚠️ No prop data available right now.");
+      return [];
+    }
+    console.error("❌ generateAIPropPicks error:", err.message);
+    return [];
+  }
 }
 
 // ================================
@@ -100,16 +175,52 @@ function updateRecord(win) {
 }
 
 // ================================
-// 🚀 Routes
+// 🚀 API Endpoints
 // ================================
 app.get("/api/picks", async (req, res) => {
   try {
     const data = await fetchOdds();
-    const picks = generateAIPicks(data);
+    const picks = generateAIGamePicks(data);
     res.json({ picks });
   } catch (err) {
     console.error("❌ /api/picks error:", err.message);
     res.status(500).json({ picks: [] });
+  }
+});
+
+app.get("/api/props", async (req, res) => {
+  try {
+    const props = await generateAIPropPicks();
+    res.json({ props });
+  } catch (err) {
+    console.error("❌ /api/props error:", err.message);
+    res.status(500).json({ props: [] });
+  }
+});
+
+// ✅ Combined AI Pick of the Day
+app.get("/api/featured", async (req, res) => {
+  try {
+    const games = await fetchOdds();
+    const gamePicks = generateAIGamePicks(games);
+    const props = await generateAIPropPicks();
+
+    const bestGame =
+      gamePicks
+        .flatMap((g) => [g.mlPick, g.spreadPick].filter(Boolean))
+        .sort((a, b) => b.confidence - a.confidence)[0] || null;
+
+    const bestProp =
+      props.sort((a, b) => b.confidence - a.confidence)[0] || null;
+
+    res.json({
+      gamePick: bestGame,
+      propPick: bestProp,
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("❌ /api/featured error:", err.message);
+    res.status(500).json({ gamePick: null, propPick: null });
   }
 });
 
@@ -124,63 +235,6 @@ app.get("/api/scores", async (req, res) => {
   }
 });
 
-// ✅ FIXED: /api/props (422-safe)
-app.get("/api/props", async (req, res) => {
-  try {
-    const url = `https://api.the-odds-api.com/v4/sports/${SPORT}/odds`;
-    const params = {
-      apiKey: ODDS_API_KEY,
-      regions: REGIONS,
-      markets:
-        "player_pass_tds,player_pass_yds,player_receptions,player_rush_yds,player_rec_yds",
-      oddsFormat: "american",
-      dateFormat: "iso",
-    };
-
-    const { data } = await axios.get(url, { params });
-    const props = [];
-
-    data.forEach((game) => {
-      const markets = game.bookmakers?.[0]?.markets || [];
-      markets.forEach((m) => {
-        m.outcomes?.forEach((o) => {
-          props.push({
-            matchup: `${game.away_team} @ ${game.home_team}`,
-            player: o.name,
-            market: m.key,
-            price: o.price,
-            point: o.point,
-            bookmaker: game.bookmakers?.[0]?.title || "Unknown",
-          });
-        });
-      });
-    });
-
-    console.log(`📊 Pulled ${props.length} player props`);
-    res.json({ props });
-  } catch (err) {
-    if (err.response?.status === 422) {
-      console.warn("⚠️ No prop data available right now (422). Returning empty.");
-      return res.json({ props: [] });
-    }
-    console.error("❌ /api/props error:", err.message);
-    res.status(500).json({ props: [] });
-  }
-});
-
-// ✅ /api/featured (will be expanded soon)
-app.get("/api/featured", async (req, res) => {
-  try {
-    const data = await fetchOdds();
-    const picks = generateAIPicks(data);
-    const best = picks.sort((a, b) => b.confidence - a.confidence)[0] || null;
-    res.json({ gamePick: best, generatedAt: new Date().toISOString() });
-  } catch (err) {
-    console.error("❌ /api/featured error:", err.message);
-    res.status(500).json({ gamePick: null });
-  }
-});
-
 app.get("/api/record", (req, res) => res.json(record));
 
 app.post("/api/result", (req, res) => {
@@ -189,7 +243,7 @@ app.post("/api/result", (req, res) => {
   res.json(record);
 });
 
-// 💳 Stripe
+// 💳 Stripe Checkout
 app.post("/api/create-checkout-session", async (req, res) => {
   try {
     const session = await stripe.checkout.sessions.create({

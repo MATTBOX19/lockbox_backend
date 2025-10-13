@@ -198,29 +198,51 @@ app.get("/api/props", async (req, res) => {
   }
 });
 
-// ✅ Combined AI Pick of the Day
+// ✅ Full LockBox Featured — Moneyline, Spread, and Prop Locks
 app.get("/api/featured", async (req, res) => {
   try {
     const games = await fetchOdds();
     const gamePicks = generateAIGamePicks(games);
     const props = await generateAIPropPicks();
 
-    const bestGame =
-      gamePicks
-        .flatMap((g) => [g.mlPick, g.spreadPick].filter(Boolean))
-        .sort((a, b) => b.confidence - a.confidence)[0] || null;
+    // Find best moneyline pick
+    const allML = gamePicks
+      .map((g) => g.mlPick)
+      .filter(Boolean)
+      .sort((a, b) => b.confidence - a.confidence);
+    const moneylineLock = allML[0] || null;
 
-    const bestProp =
-      props.sort((a, b) => b.confidence - a.confidence)[0] || null;
+    // Find best spread pick
+    const allSpreads = gamePicks
+      .map((g) => g.spreadPick)
+      .filter(Boolean)
+      .sort((a, b) => b.confidence - a.confidence);
+    const spreadLock = allSpreads[0] || null;
+
+    // Find best prop pick
+    const propLock =
+      props.length > 0
+        ? props.sort((a, b) => b.confidence - a.confidence)[0]
+        : {
+            player: "No props available",
+            market: "N/A",
+            confidence: 0,
+            bookmaker: "N/A",
+          };
 
     res.json({
-      gamePick: bestGame,
-      propPick: bestProp,
+      moneylineLock,
+      spreadLock,
+      propLock,
       generatedAt: new Date().toISOString(),
     });
   } catch (err) {
     console.error("❌ /api/featured error:", err.message);
-    res.status(500).json({ gamePick: null, propPick: null });
+    res.status(500).json({
+      moneylineLock: null,
+      spreadLock: null,
+      propLock: null,
+    });
   }
 });
 

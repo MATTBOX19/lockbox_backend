@@ -18,7 +18,7 @@ const RESULT_LOG = "./results.json";
 const SPORT = "americanfootball_nfl";
 const REGIONS = "us";
 const MARKETS = "h2h,spreads,totals";
-const ODDS_CACHE_MS = 5 * 60 * 1000; // 5 minutes cache
+const ODDS_CACHE_MS = 5 * 60 * 1000; // 5 minutes
 
 let record = { wins: 0, losses: 0, winRate: 0 };
 if (fs.existsSync(RESULT_LOG)) {
@@ -26,7 +26,7 @@ if (fs.existsSync(RESULT_LOG)) {
 }
 
 // ================================
-// 📈 Utility helpers
+// 📈 Helpers
 // ================================
 const impliedProb = (ml) =>
   ml < 0 ? (-ml) / ((-ml) + 100) : 100 / (ml + 100);
@@ -48,12 +48,12 @@ async function fetchOdds() {
 
   const res = await axios.get(url, { params });
   oddsCache = { data: res.data, ts: Date.now() };
-  console.log(`📊 Pulled ${res.data.length} live NFL games`);
+  console.log(`📊 Pulled ${res.data.length} NFL games`);
   return res.data;
 }
 
 // ================================
-// 🧠 AI Pick Generator
+// 🧠 AI Picks (Moneyline only for now)
 // ================================
 function generateAIPicks(games) {
   return games
@@ -62,7 +62,7 @@ function generateAIPicks(games) {
       const away = g.away_team;
       const markets = g.bookmakers?.[0]?.markets || [];
       const h2h = markets.find((m) => m.key === "h2h");
-      if (!h2h || !h2h.outcomes) return null;
+      if (!h2h) return null;
 
       const homeML = h2h.outcomes.find((o) => o.name === home)?.price;
       const awayML = h2h.outcomes.find((o) => o.name === away)?.price;
@@ -70,11 +70,8 @@ function generateAIPicks(games) {
 
       const homeProb = impliedProb(homeML);
       const awayProb = impliedProb(awayML);
-      const edge = Math.abs(homeProb - awayProb);
-
       const pick = homeProb > awayProb ? home : away;
-      const confidence = Math.round(50 + edge * 100);
-      const bookmaker = g.bookmakers?.[0]?.title || "Unknown";
+      const confidence = Math.round(Math.abs(homeProb - awayProb) * 100);
 
       return {
         matchup: `${away} @ ${home}`,
@@ -82,8 +79,8 @@ function generateAIPicks(games) {
         confidence,
         homeML,
         awayML,
-        bookmaker,
-        model: confidence > 60 ? "LockBox Alpha" : "LockBox Lite",
+        bookmaker: g.bookmakers?.[0]?.title || "Unknown",
+        type: "moneyline",
       };
     })
     .filter(Boolean);
@@ -103,7 +100,7 @@ function updateRecord(win) {
 }
 
 // ================================
-// 🚀 API Endpoints
+// 🚀 Routes
 // ================================
 app.get("/api/picks", async (req, res) => {
   try {
@@ -116,7 +113,6 @@ app.get("/api/picks", async (req, res) => {
   }
 });
 
-// ✅ Simplified /api/scores
 app.get("/api/scores", async (req, res) => {
   try {
     const url = `https://api.the-odds-api.com/v4/sports/${SPORT}/scores/?daysFrom=1&apiKey=${ODDS_API_KEY}`;
@@ -128,20 +124,22 @@ app.get("/api/scores", async (req, res) => {
   }
 });
 
-// ✅ NEW: /api/props (player props)
+// ✅ FIXED: /api/props (422-safe)
 app.get("/api/props", async (req, res) => {
   try {
     const url = `https://api.the-odds-api.com/v4/sports/${SPORT}/odds`;
     const params = {
       apiKey: ODDS_API_KEY,
       regions: REGIONS,
-      markets: "player_pass_tds,player_pass_yds,player_receptions,player_rush_yds,player_rec_yds",
+      markets:
+        "player_pass_tds,player_pass_yds,player_receptions,player_rush_yds,player_rec_yds",
       oddsFormat: "american",
       dateFormat: "iso",
     };
-    const { data } = await axios.get(url, { params });
 
+    const { data } = await axios.get(url, { params });
     const props = [];
+
     data.forEach((game) => {
       const markets = game.bookmakers?.[0]?.markets || [];
       markets.forEach((m) => {
@@ -158,59 +156,28 @@ app.get("/api/props", async (req, res) => {
       });
     });
 
+    console.log(`📊 Pulled ${props.length} player props`);
     res.json({ props });
   } catch (err) {
+    if (err.response?.status === 422) {
+      console.warn("⚠️ No prop data available right now (422). Returning empty.");
+      return res.json({ props: [] });
+    }
     console.error("❌ /api/props error:", err.message);
     res.status(500).json({ props: [] });
   }
 });
 
-// ✅ NEW: /api/featured — Pick & Prop of the Day
+// ✅ /api/featured (will be expanded soon)
 app.get("/api/featured", async (req, res) => {
   try {
-    // Get picks
-    const oddsData = await fetchOdds();
-    const picks = generateAIPicks(oddsData);
-    const topPick = picks.sort((a, b) => b.confidence - a.confidence)[0];
-
-    // Get props
-    const url = `https://api.the-odds-api.com/v4/sports/${SPORT}/odds`;
-    const params = {
-      apiKey: ODDS_API_KEY,
-      regions: REGIONS,
-      markets: "player_pass_yds,player_receptions,player_rush_yds,player_rec_yds",
-      oddsFormat: "american",
-      dateFormat: "iso",
-    };
-    const { data: propsData } = await axios.get(url, { params });
-    let topProp = null;
-
-    propsData.forEach((game) => {
-      const markets = game.bookmakers?.[0]?.markets || [];
-      markets.forEach((m) => {
-        m.outcomes?.forEach((o) => {
-          if (!topProp || Math.abs(o.price) < Math.abs(topProp.price)) {
-            topProp = {
-              player: o.name,
-              market: m.key,
-              price: o.price,
-              point: o.point,
-              matchup: `${game.away_team} @ ${game.home_team}`,
-              bookmaker: game.bookmakers?.[0]?.title || "Unknown",
-            };
-          }
-        });
-      });
-    });
-
-    res.json({
-      gamePick: topPick || {},
-      propPick: topProp || {},
-      generatedAt: new Date().toISOString(),
-    });
+    const data = await fetchOdds();
+    const picks = generateAIPicks(data);
+    const best = picks.sort((a, b) => b.confidence - a.confidence)[0] || null;
+    res.json({ gamePick: best, generatedAt: new Date().toISOString() });
   } catch (err) {
     console.error("❌ /api/featured error:", err.message);
-    res.status(500).json({ gamePick: {}, propPick: {} });
+    res.status(500).json({ gamePick: null });
   }
 });
 
@@ -222,7 +189,7 @@ app.post("/api/result", (req, res) => {
   res.json(record);
 });
 
-// 💳 Stripe Subscriptions
+// 💳 Stripe
 app.post("/api/create-checkout-session", async (req, res) => {
   try {
     const session = await stripe.checkout.sessions.create({
@@ -240,7 +207,7 @@ app.post("/api/create-checkout-session", async (req, res) => {
   }
 });
 
-// 👤 Authentication
+// 👤 Auth
 let users = [
   { id: 1, email: "admin@lockbox.ai", password: "masterkey", role: "admin" },
 ];
@@ -249,7 +216,6 @@ app.post("/api/signup", (req, res) => {
   const { email, password } = req.body;
   if (users.find((u) => u.email === email))
     return res.status(400).json({ error: "Email already registered" });
-
   const newUser = { id: Date.now(), email, password, role: "member" };
   users.push(newUser);
   const token = generateToken(newUser);

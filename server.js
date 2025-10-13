@@ -28,8 +28,7 @@ if (fs.existsSync(RESULT_LOG)) {
 // ================================
 // 📈 Utility helpers
 // ================================
-const impliedProb = (ml) =>
-  ml < 0 ? (-ml) / ((-ml) + 100) : 100 / (ml + 100);
+const impliedProb = (ml) => (ml < 0 ? (-ml) / ((-ml) + 100) : 100 / (ml + 100));
 
 let oddsCache = { data: null, ts: 0 };
 
@@ -60,13 +59,14 @@ function generateAIPicks(games) {
     .map((g) => {
       const home = g.home_team;
       const away = g.away_team;
+
       const markets = g.bookmakers?.[0]?.markets || [];
       const h2h = markets.find((m) => m.key === "h2h");
       if (!h2h || !h2h.outcomes) return null;
 
       const homeML = h2h.outcomes.find((o) => o.name === home)?.price;
       const awayML = h2h.outcomes.find((o) => o.name === away)?.price;
-      if (!homeML || !awayML) return null;
+      if (homeML == null || awayML == null) return null;
 
       const homeProb = impliedProb(homeML);
       const awayProb = impliedProb(awayML);
@@ -78,9 +78,11 @@ function generateAIPicks(games) {
 
       const bookmaker = g.bookmakers?.[0]?.title || "Unknown";
 
-      // Extract spreads/totals if available
       const spreads = markets.find((m) => m.key === "spreads");
       const totals = markets.find((m) => m.key === "totals");
+
+      // 👉 add oddsText and mirror MLs top-level for the frontend
+      const oddsText = `${awayML} / ${homeML}`;
 
       return {
         matchup: `${away} @ ${home}`,
@@ -89,12 +91,19 @@ function generateAIPicks(games) {
         edge: `${valueEdge}%`,
         aiModel: confidence > 60 ? "LockBox Alpha" : "LockBox Lite",
         bookmaker,
+
+        // keep nested detail
         odds: {
           homeML,
           awayML,
           spread: spreads?.outcomes || [],
           total: totals?.outcomes || [],
         },
+
+        // and also top-level for compatibility
+        homeML,
+        awayML,
+        oddsText,
       };
     })
     .filter(Boolean);
@@ -106,10 +115,7 @@ function generateAIPicks(games) {
 function updateRecord(win) {
   if (win) record.wins++;
   else record.losses++;
-  record.winRate = (
-    (record.wins / (record.wins + record.losses)) *
-    100
-  ).toFixed(1);
+  record.winRate = ((record.wins / (record.wins + record.losses)) * 100).toFixed(1);
   fs.writeFileSync(RESULT_LOG, JSON.stringify(record, null, 2));
 }
 
@@ -158,15 +164,12 @@ app.post("/api/create-checkout-session", async (req, res) => {
 // ================================
 // 👤 Authentication
 // ================================
-let users = [
-  { id: 1, email: "admin@lockbox.ai", password: "masterkey", role: "admin" },
-];
+let users = [{ id: 1, email: "admin@lockbox.ai", password: "masterkey", role: "admin" }];
 
 app.post("/api/signup", (req, res) => {
   const { email, password } = req.body;
   if (users.find((u) => u.email === email))
     return res.status(400).json({ error: "Email already registered" });
-
   const newUser = { id: Date.now(), email, password, role: "member" };
   users.push(newUser);
   const token = generateToken(newUser);

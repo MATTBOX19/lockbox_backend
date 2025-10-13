@@ -24,6 +24,13 @@ app.use(
 );
 
 app.use(express.json());
+app.get("/api/debug/env", (req, res) => {
+  res.json({
+    hasODDS_API_KEY: !!process.env.ODDS_API_KEY,
+    ODDS_REGIONS: process.env.ODDS_REGIONS || "(not set, defaulting to 'us')",
+  });
+});
+
 
 // =======================
 // ⚙️ CONFIG

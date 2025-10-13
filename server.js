@@ -103,6 +103,56 @@ function updateRecord(win) {
 }
 
 // ================================
+// 🏈 Player Props Helpers (NFL)
+// ================================
+const PROP_MARKETS = [
+  "player_pass_tds",
+  "player_pass_yards",
+  "player_rush_yds",
+  "player_rec_yds",
+  "player_receptions",
+];
+
+// Normalize Odds API prop markets to a simple list for the UI
+function normalizePlayerProps(apiGames) {
+  const props = [];
+
+  for (const g of apiGames || []) {
+    const home = g.home_team;
+    const away = g.away_team;
+    const bm = g.bookmakers?.[0];
+    if (!bm?.markets) continue;
+
+    for (const m of bm.markets) {
+      if (!PROP_MARKETS.includes(m.key)) continue;
+
+      const over = m.outcomes?.find((o) => o.name?.toLowerCase() === "over");
+      const under = m.outcomes?.find((o) => o.name?.toLowerCase() === "under");
+
+      // Player name can appear in different fields; pick the best available.
+      const playerName =
+        m?.outcomes?.[0]?.description ||
+        m?.player ||
+        m?.title ||
+        "Unknown Player";
+
+      props.push({
+        matchup: `${away} @ ${home}`,
+        market: m.key, // e.g., "player_rec_yds"
+        player: playerName,
+        line: over?.point ?? under?.point ?? null,
+        over: over ? over.price : null,
+        under: under ? under.price : null,
+        bookmaker: bm.title || "Unknown",
+        commence_time: g.commence_time,
+      });
+    }
+  }
+
+  return props;
+}
+
+// ================================
 // 🚀 API Endpoints
 // ================================
 app.get("/api/picks", async (req, res) => {
@@ -116,15 +166,36 @@ app.get("/api/picks", async (req, res) => {
   }
 });
 
-// ✅ Fixed: Simplified /api/scores output
+// ✅ Simplified /api/scores output (array)
 app.get("/api/scores", async (req, res) => {
   try {
     const url = `https://api.the-odds-api.com/v4/sports/${SPORT}/scores/?daysFrom=1&apiKey=${ODDS_API_KEY}`;
     const scores = await axios.get(url);
-    res.json(scores.data); // <-- return array directly (not { games: ... })
+    res.json(scores.data);
   } catch (err) {
     console.error("❌ /api/scores error:", err.message);
     res.status(500).json([]);
+  }
+});
+
+// ✅ NEW: Player props endpoint (NFL)
+app.get("/api/props", async (req, res) => {
+  try {
+    const url = `https://api.the-odds-api.com/v4/sports/${SPORT}/odds`;
+    const params = {
+      apiKey: ODDS_API_KEY,
+      regions: REGIONS,
+      oddsFormat: "american",
+      dateFormat: "iso",
+      markets: PROP_MARKETS.join(","),
+    };
+
+    const response = await axios.get(url, { params });
+    const normalized = normalizePlayerProps(response.data);
+    res.json({ props: normalized });
+  } catch (err) {
+    console.error("❌ /api/props error:", err.message);
+    res.status(500).json({ props: [] });
   }
 });
 

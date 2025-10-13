@@ -221,9 +221,9 @@ function saveHistory(entry) {
   fs.writeFileSync(HISTORY_LOG, JSON.stringify(history, null, 2));
 }
 
-// =======================
-// 🚀 ROUTES
-// =======================
+// ==================================
+// 🚀 Routes
+// ==================================
 app.get("/api/picks", async (req, res) => {
   try {
     const data = await fetchOdds();
@@ -241,22 +241,17 @@ app.get("/api/featured", async (req, res) => {
     const gamePicks = await generateAIGamePicks(games);
     const props = await generateAIPropPicks();
 
-    const moneylineLock =
-      gamePicks
-        ?.map((g) => g.mlPick)
-        ?.filter(Boolean)
-        ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
+    const moneylineLock = gamePicks?.map((g) => g.mlPick)
+      ?.filter(Boolean)
+      ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
 
-    const spreadLock =
-      gamePicks
-        ?.map((g) => g.spreadPick)
-        ?.filter(Boolean)
-        ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
+    const spreadLock = gamePicks?.map((g) => g.spreadPick)
+      ?.filter(Boolean)
+      ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
 
-    const propLock =
-      props.length > 0
-        ? props.sort((a, b) => b.confidence - a.confidence)[0]
-        : { player: "No props available", confidence: 0 };
+    const propLock = props.length > 0
+      ? props.sort((a, b) => b.confidence - a.confidence)[0]
+      : { player: "No props available", confidence: 0 };
 
     const featured = {
       moneylineLock,
@@ -275,6 +270,17 @@ app.get("/api/featured", async (req, res) => {
       spreadLock: null,
       propLock: { player: "No props available", confidence: 0 },
     });
+  }
+});
+
+// 🏈 ADD THIS
+app.get("/api/props", async (req, res) => {
+  try {
+    const props = await generateAIPropPicks();
+    res.json(props);
+  } catch (err) {
+    console.error("❌ /api/props error:", err.message);
+    res.status(500).json({ error: "Failed to fetch prop picks" });
   }
 });
 

@@ -116,15 +116,15 @@ app.get("/api/picks", async (req, res) => {
   }
 });
 
-// ✅ New: Live scores endpoint
+// ✅ Fixed: Simplified /api/scores output
 app.get("/api/scores", async (req, res) => {
   try {
     const url = `https://api.the-odds-api.com/v4/sports/${SPORT}/scores/?daysFrom=1&apiKey=${ODDS_API_KEY}`;
     const scores = await axios.get(url);
-    res.json({ games: scores.data });
+    res.json(scores.data); // <-- return array directly (not { games: ... })
   } catch (err) {
     console.error("❌ /api/scores error:", err.message);
-    res.status(500).json({ games: [] });
+    res.status(500).json([]);
   }
 });
 
@@ -155,7 +155,9 @@ app.post("/api/create-checkout-session", async (req, res) => {
 });
 
 // 👤 Authentication
-let users = [{ id: 1, email: "admin@lockbox.ai", password: "masterkey", role: "admin" }];
+let users = [
+  { id: 1, email: "admin@lockbox.ai", password: "masterkey", role: "admin" },
+];
 
 app.post("/api/signup", (req, res) => {
   const { email, password } = req.body;

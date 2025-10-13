@@ -44,27 +44,21 @@ app.get("/api/debug/props-raw", async (req, res) => {
       regions: process.env.ODDS_REGIONS || "us",
       markets: [
         "player_pass_yds",
-        "player_pass_tds",
         "player_rush_yds",
-        "player_rush_tds",
         "player_rec_yds",
         "player_receptions",
-        "player_anytime_td",
-      ].join(","),
-      bookmakers: "draftkings,fanduel,betmgm,caesars,pointsbetus,bovada",
+      ].join(","), // simpler, supported set
       oddsFormat: "american",
       dateFormat: "iso",
     };
 
     const { data } = await axios.get(url, { params });
 
-    const summary = (data || []).slice(0, 5).map((g) => ({
+    // summarize first few
+    const summary = (data || []).slice(0, 3).map((g) => ({
       matchup: `${g.away_team} @ ${g.home_team}`,
-      book: g.bookmakers?.[0]?.title || "(no book)",
-      marketKeys: (g.bookmakers?.[0]?.markets || []).map((m) => m.key),
-      playerMarketCount: (g.bookmakers?.[0]?.markets || []).filter((m) =>
-        m.key?.startsWith("player_")
-      ).length,
+      bookmaker: g.bookmakers?.[0]?.title || "none",
+      marketCount: g.bookmakers?.[0]?.markets?.length || 0,
     }));
 
     res.json({
@@ -72,6 +66,8 @@ app.get("/api/debug/props-raw", async (req, res) => {
       sample: summary,
     });
   } catch (err) {
+    console.error("⚠️ props-raw failed:", err.message);
+    if (err.response?.data) console.error("Details:", err.response.data);
     res.status(500).json({ error: err.message });
   }
 });

@@ -41,34 +41,25 @@ app.get("/api/debug/props-raw", async (req, res) => {
     const url = `https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds`;
     const params = {
       apiKey: process.env.ODDS_API_KEY,
-      regions: process.env.ODDS_REGIONS || "us",
-      markets: [
-        "player_pass_yds",
-        "player_rush_yds",
-        "player_rec_yds",
-        "player_receptions",
-      ].join(","), // simpler, supported set
+      regions: "us",
+      markets: "h2h,spreads,totals",
       oddsFormat: "american",
       dateFormat: "iso",
     };
 
     const { data } = await axios.get(url, { params });
-
-    // summarize first few
-    const summary = (data || []).slice(0, 3).map((g) => ({
-      matchup: `${g.away_team} @ ${g.home_team}`,
-      bookmaker: g.bookmakers?.[0]?.title || "none",
-      marketCount: g.bookmakers?.[0]?.markets?.length || 0,
-    }));
-
     res.json({
       totalGames: data?.length || 0,
-      sample: summary,
+      sample: (data || []).slice(0, 3).map((g) => ({
+        matchup: `${g.away_team} @ ${g.home_team}`,
+        bookmaker: g.bookmakers?.[0]?.title || "none",
+      })),
     });
   } catch (err) {
-    console.error("⚠️ props-raw failed:", err.message);
-    if (err.response?.data) console.error("Details:", err.response.data);
-    res.status(500).json({ error: err.message });
+    console.error("props-raw failed:", err.response?.data || err.message);
+    res
+      .status(500)
+      .json({ error: err.response?.data || err.message });
   }
 });
 
@@ -99,7 +90,7 @@ if (fs.existsSync(HISTORY_LOG))
 // 🧮 HELPERS
 // =======================
 const impliedProb = (ml) =>
-  ml < 0 ? -ml / (-ml + 100) : 100 / (ml + 100);
+  ml < 0 ? (-ml) / ((-ml) + 100) : 100 / (ml + 100);
 
 async function fetchOdds() {
   const fresh = oddsCache.data && Date.now() - oddsCache.ts < ODDS_CACHE_MS;
@@ -138,8 +129,12 @@ function calculateConfidence(homeOdds, awayOdds, lineType) {
   const awayProb = toProb(awayOdds);
   const diff = Math.abs(homeProb - awayProb);
 
-  if (lineType === "moneyline") return Math.round(50 + diff * 100);
-  if (lineType === "spread") return Math.round(40 + diff * 80);
+  if (lineType === "moneyline") {
+    return Math.round(50 + diff * 100);
+  }
+  if (lineType === "spread") {
+    return Math.round(40 + diff * 80);
+  }
   return Math.round(50 + Math.random() * 25);
 }
 
@@ -203,48 +198,37 @@ async function generateAIGamePicks(games) {
 }
 
 // =======================
-// 🧩 PROP PICKS
+// 🧩 PROP PICKS (Safe Fallback)
 // =======================
 async function generateAIPropPicks() {
   try {
-    const url = `https://api.the-odds-api.com/v4/sports/${SPORT}/odds`;
-    const { data } = await axios.get(url, {
-      params: {
-        apiKey: ODDS_API_KEY,
-        regions: REGIONS,
-        markets:
-          "player_pass_yds,player_rush_yds,player_rec_yds,player_receptions",
-        oddsFormat: "american",
-        dateFormat: "iso",
-      },
-    });
-
-    if (!Array.isArray(data)) return [];
-
-    const props = [];
-    data.forEach((game) => {
-      const markets = game.bookmakers?.[0]?.markets || [];
-      markets.forEach((m) => {
-        m.outcomes?.forEach((o) => {
-          const confidence = Math.max(50, 100 - Math.abs(o.price) / 10);
-          props.push({
-            matchup: `${game.away_team} @ ${game.home_team}`,
-            player: o.name,
-            market: m.key,
-            price: o.price,
-            point: o.point,
-            confidence,
-          });
-        });
-      });
-    });
-
-    return props;
+    // Odds API plan doesn't support player props yet
+    console.warn("⚠️ No prop data available on this plan.");
+    return []; // return empty list so frontend can handle gracefully
   } catch {
-    console.warn("⚠️ No prop data available.");
     return [];
   }
 }
+
+// ✅ Add this clean endpoint for the frontend
+app.get("/api/props", async (req, res) => {
+  try {
+    const props = await generateAIPropPicks();
+    if (!props.length) {
+      return res.json({
+        message: "No prop data available on your current plan.",
+        props: [],
+      });
+    }
+    res.json({ props });
+  } catch (err) {
+    console.error("❌ /api/props error:", err.message);
+    res.status(500).json({
+      message: "No prop data available.",
+      props: [],
+    });
+  }
+});
 
 // =======================
 // 📈 RECORD TRACKING
@@ -264,9 +248,9 @@ function saveHistory(entry) {
   fs.writeFileSync(HISTORY_LOG, JSON.stringify(history, null, 2));
 }
 
-// ==================================
+// =======================
 // 🚀 ROUTES
-// ==================================
+// =======================
 app.get("/api/picks", async (req, res) => {
   try {
     const data = await fetchOdds();
@@ -284,22 +268,17 @@ app.get("/api/featured", async (req, res) => {
     const gamePicks = await generateAIGamePicks(games);
     const props = await generateAIPropPicks();
 
-    const moneylineLock =
-      gamePicks
-        ?.map((g) => g.mlPick)
-        ?.filter(Boolean)
-        ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
+    const moneylineLock = gamePicks?.map((g) => g.mlPick)
+      ?.filter(Boolean)
+      ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
 
-    const spreadLock =
-      gamePicks
-        ?.map((g) => g.spreadPick)
-        ?.filter(Boolean)
-        ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
+    const spreadLock = gamePicks?.map((g) => g.spreadPick)
+      ?.filter(Boolean)
+      ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
 
-    const propLock =
-      props.length > 0
-        ? props.sort((a, b) => b.confidence - a.confidence)[0]
-        : { player: "No props available", confidence: 0 };
+    const propLock = props.length > 0
+      ? props.sort((a, b) => b.confidence - a.confidence)[0]
+      : { player: "No props available", confidence: 0 };
 
     const featured = {
       moneylineLock,
@@ -318,16 +297,6 @@ app.get("/api/featured", async (req, res) => {
       spreadLock: null,
       propLock: { player: "No props available", confidence: 0 },
     });
-  }
-});
-
-app.get("/api/props", async (req, res) => {
-  try {
-    const props = await generateAIPropPicks();
-    res.json(props);
-  } catch (err) {
-    console.error("❌ /api/props error:", err.message);
-    res.status(500).json({ error: "Failed to fetch prop picks" });
   }
 });
 

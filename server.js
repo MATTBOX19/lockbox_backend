@@ -24,13 +24,57 @@ app.use(
 );
 
 app.use(express.json());
+
+// =======================
+// 🧩 DEBUG ROUTES
+// =======================
 app.get("/api/debug/env", (req, res) => {
   res.json({
     hasODDS_API_KEY: !!process.env.ODDS_API_KEY,
-    ODDS_REGIONS: process.env.ODDS_REGIONS || "(not set, defaulting to 'us')",
+    ODDS_REGIONS: process.env.ODDS_REGIONS || "not set",
+    STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY ? "✅ set" : "❌ missing",
   });
 });
 
+app.get("/api/debug/props-raw", async (req, res) => {
+  try {
+    const url = `https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds`;
+    const params = {
+      apiKey: process.env.ODDS_API_KEY,
+      regions: process.env.ODDS_REGIONS || "us",
+      markets: [
+        "player_pass_yds",
+        "player_pass_tds",
+        "player_rush_yds",
+        "player_rush_tds",
+        "player_rec_yds",
+        "player_receptions",
+        "player_anytime_td",
+      ].join(","),
+      bookmakers: "draftkings,fanduel,betmgm,caesars,pointsbetus,bovada",
+      oddsFormat: "american",
+      dateFormat: "iso",
+    };
+
+    const { data } = await axios.get(url, { params });
+
+    const summary = (data || []).slice(0, 5).map((g) => ({
+      matchup: `${g.away_team} @ ${g.home_team}`,
+      book: g.bookmakers?.[0]?.title || "(no book)",
+      marketKeys: (g.bookmakers?.[0]?.markets || []).map((m) => m.key),
+      playerMarketCount: (g.bookmakers?.[0]?.markets || []).filter((m) =>
+        m.key?.startsWith("player_")
+      ).length,
+    }));
+
+    res.json({
+      totalGames: data?.length || 0,
+      sample: summary,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // =======================
 // ⚙️ CONFIG
@@ -59,7 +103,7 @@ if (fs.existsSync(HISTORY_LOG))
 // 🧮 HELPERS
 // =======================
 const impliedProb = (ml) =>
-  ml < 0 ? (-ml) / ((-ml) + 100) : 100 / (ml + 100);
+  ml < 0 ? -ml / (-ml + 100) : 100 / (ml + 100);
 
 async function fetchOdds() {
   const fresh = oddsCache.data && Date.now() - oddsCache.ts < ODDS_CACHE_MS;
@@ -98,12 +142,8 @@ function calculateConfidence(homeOdds, awayOdds, lineType) {
   const awayProb = toProb(awayOdds);
   const diff = Math.abs(homeProb - awayProb);
 
-  if (lineType === "moneyline") {
-    return Math.round(50 + diff * 100);
-  }
-  if (lineType === "spread") {
-    return Math.round(40 + diff * 80);
-  }
+  if (lineType === "moneyline") return Math.round(50 + diff * 100);
+  if (lineType === "spread") return Math.round(40 + diff * 80);
   return Math.round(50 + Math.random() * 25);
 }
 
@@ -229,7 +269,7 @@ function saveHistory(entry) {
 }
 
 // ==================================
-// 🚀 Routes
+// 🚀 ROUTES
 // ==================================
 app.get("/api/picks", async (req, res) => {
   try {
@@ -248,17 +288,22 @@ app.get("/api/featured", async (req, res) => {
     const gamePicks = await generateAIGamePicks(games);
     const props = await generateAIPropPicks();
 
-    const moneylineLock = gamePicks?.map((g) => g.mlPick)
-      ?.filter(Boolean)
-      ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
+    const moneylineLock =
+      gamePicks
+        ?.map((g) => g.mlPick)
+        ?.filter(Boolean)
+        ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
 
-    const spreadLock = gamePicks?.map((g) => g.spreadPick)
-      ?.filter(Boolean)
-      ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
+    const spreadLock =
+      gamePicks
+        ?.map((g) => g.spreadPick)
+        ?.filter(Boolean)
+        ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
 
-    const propLock = props.length > 0
-      ? props.sort((a, b) => b.confidence - a.confidence)[0]
-      : { player: "No props available", confidence: 0 };
+    const propLock =
+      props.length > 0
+        ? props.sort((a, b) => b.confidence - a.confidence)[0]
+        : { player: "No props available", confidence: 0 };
 
     const featured = {
       moneylineLock,
@@ -280,7 +325,6 @@ app.get("/api/featured", async (req, res) => {
   }
 });
 
-// 🏈 ADD THIS
 app.get("/api/props", async (req, res) => {
   try {
     const props = await generateAIPropPicks();

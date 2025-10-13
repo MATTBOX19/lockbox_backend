@@ -8,12 +8,26 @@ import dotenv from "dotenv";
 dotenv.config();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
-app.use(cors());
+
+// =======================
+// ✅ CORS CONFIG
+// =======================
+app.use(
+  cors({
+    origin: [
+      "https://lockbox-frontend.onrender.com",
+      "http://localhost:3000",
+    ],
+    methods: ["GET", "POST"],
+    credentials: true,
+  })
+);
+
 app.use(express.json());
 
-// ==================================
-// ⚙️ Config
-// ==================================
+// =======================
+// ⚙️ CONFIG
+// =======================
 const SPORT = "americanfootball_nfl";
 const REGIONS = "us";
 const MARKETS = "h2h,spreads,totals";
@@ -22,20 +36,23 @@ const ODDS_CACHE_MS = 5 * 60 * 1000;
 const RESULT_LOG = "./results.json";
 const HISTORY_LOG = "./ai_history.json";
 
-// ==================================
-// 📊 Data Caches
-// ==================================
+// =======================
+// 🧠 DATA CACHES
+// =======================
 let oddsCache = { data: null, ts: 0 };
 let record = { wins: 0, losses: 0, winRate: 0 };
 let history = [];
 
-if (fs.existsSync(RESULT_LOG)) record = JSON.parse(fs.readFileSync(RESULT_LOG));
-if (fs.existsSync(HISTORY_LOG)) history = JSON.parse(fs.readFileSync(HISTORY_LOG));
+if (fs.existsSync(RESULT_LOG))
+  record = JSON.parse(fs.readFileSync(RESULT_LOG));
+if (fs.existsSync(HISTORY_LOG))
+  history = JSON.parse(fs.readFileSync(HISTORY_LOG));
 
-// ==================================
-// 🧮 Helpers
-// ==================================
-const impliedProb = (ml) => (ml < 0 ? (-ml) / ((-ml) + 100) : 100 / (ml + 100));
+// =======================
+// 🧮 HELPERS
+// =======================
+const impliedProb = (ml) =>
+  ml < 0 ? (-ml) / ((-ml) + 100) : 100 / (ml + 100);
 
 async function fetchOdds() {
   const fresh = oddsCache.data && Date.now() - oddsCache.ts < ODDS_CACHE_MS;
@@ -63,68 +80,88 @@ async function fetchOdds() {
   }
 }
 
-// ==================================
-// 🧠 AI Game Picks
-// ==================================
+// =======================
+// 🧠 AI GAME PICKS
+// =======================
+function calculateConfidence(homeOdds, awayOdds, lineType) {
+  const toProb = (odds) =>
+    odds > 0 ? 100 / (odds + 100) : Math.abs(odds) / (Math.abs(odds) + 100);
+
+  const homeProb = toProb(homeOdds);
+  const awayProb = toProb(awayOdds);
+  const diff = Math.abs(homeProb - awayProb);
+
+  if (lineType === "moneyline") {
+    return Math.round(50 + diff * 100);
+  }
+  if (lineType === "spread") {
+    return Math.round(40 + diff * 80);
+  }
+  return Math.round(50 + Math.random() * 25);
+}
+
 async function generateAIGamePicks(games) {
   if (!Array.isArray(games)) return [];
 
-  return games.map((g) => {
-    const home = g.home_team;
-    const away = g.away_team;
-    const bookmaker = g.bookmakers?.[0]?.title || "Unknown";
-    const markets = g.bookmakers?.[0]?.markets || [];
+  return games
+    .map((g) => {
+      const home = g.home_team;
+      const away = g.away_team;
+      const bookmaker = g.bookmakers?.[0]?.title || "Unknown";
+      const markets = g.bookmakers?.[0]?.markets || [];
 
-    const h2h = markets.find((m) => m.key === "h2h");
-    const spread = markets.find((m) => m.key === "spreads");
+      const h2h = markets.find((m) => m.key === "h2h");
+      const spread = markets.find((m) => m.key === "spreads");
 
-    const homeML = h2h?.outcomes?.find((o) => o.name === home)?.price;
-    const awayML = h2h?.outcomes?.find((o) => o.name === away)?.price;
+      const homeML = h2h?.outcomes?.find((o) => o.name === home)?.price;
+      const awayML = h2h?.outcomes?.find((o) => o.name === away)?.price;
 
-    if (!homeML || !awayML) return null;
+      if (!homeML || !awayML) return null;
 
-    const homeProb = impliedProb(homeML);
-    const awayProb = impliedProb(awayML);
-    const edge = Math.abs(homeProb - awayProb);
-
-    const baseConfidence = 55 + edge * 70;
-    const confidence = Math.min(95, Math.max(55, baseConfidence));
-
-    const pick = homeProb > awayProb ? home : away;
-
-    const homeSpread = spread?.outcomes?.find((o) => o.name === home);
-    const awaySpread = spread?.outcomes?.find((o) => o.name === away);
-
-    let spreadPick = null;
-    if (homeSpread && awaySpread) {
-      const priceEdge = Math.abs(homeSpread.price - awaySpread.price) / 100;
-      const pointEdge = Math.abs(homeSpread.point - awaySpread.point);
-      const spreadConf = Math.min(95, 55 + edge * 60 + priceEdge * 8 + pointEdge * 3);
-      spreadPick = {
-        type: "spread",
-        pick: Math.abs(homeSpread.price) < Math.abs(awaySpread.price) ? home : away,
-        confidence: Math.round(spreadConf),
-      };
-    }
-
-    return {
-      matchup: `${away} @ ${home}`,
-      bookmaker,
-      mlPick: {
+      const mlConfidence = calculateConfidence(homeML, awayML, "moneyline");
+      const mlPick = {
         type: "moneyline",
-        pick,
-        confidence: Math.round(confidence),
+        pick: impliedProb(homeML) > impliedProb(awayML) ? home : away,
+        confidence: mlConfidence,
         homeML,
         awayML,
-      },
-      spreadPick,
-    };
-  }).filter(Boolean);
+      };
+
+      const homeSpread = spread?.outcomes?.find((o) => o.name === home);
+      const awaySpread = spread?.outcomes?.find((o) => o.name === away);
+      let spreadPick = null;
+
+      if (homeSpread && awaySpread) {
+        const spreadConfidence = calculateConfidence(
+          homeSpread.price,
+          awaySpread.price,
+          "spread"
+        );
+        spreadPick = {
+          type: "spread",
+          pick:
+            Math.abs(homeSpread.price) < Math.abs(awaySpread.price)
+              ? home
+              : away,
+          confidence: spreadConfidence,
+          homeSpread,
+          awaySpread,
+        };
+      }
+
+      return {
+        matchup: `${away} @ ${home}`,
+        bookmaker,
+        mlPick,
+        spreadPick,
+      };
+    })
+    .filter(Boolean);
 }
 
-// ==================================
-// 🧩 Prop Picks
-// ==================================
+// =======================
+// 🧩 PROP PICKS
+// =======================
 async function generateAIPropPicks() {
   try {
     const url = `https://api.the-odds-api.com/v4/sports/${SPORT}/odds`;
@@ -132,7 +169,8 @@ async function generateAIPropPicks() {
       params: {
         apiKey: ODDS_API_KEY,
         regions: REGIONS,
-        markets: "player_pass_yds,player_rush_yds,player_rec_yds,player_receptions",
+        markets:
+          "player_pass_yds,player_rush_yds,player_rec_yds,player_receptions",
         oddsFormat: "american",
         dateFormat: "iso",
       },
@@ -165,13 +203,16 @@ async function generateAIPropPicks() {
   }
 }
 
-// ==================================
-// 📈 Record Tracking
-// ==================================
+// =======================
+// 📈 RECORD TRACKING
+// =======================
 function updateRecord(win) {
   if (win) record.wins++;
   else record.losses++;
-  record.winRate = ((record.wins / (record.wins + record.losses)) * 100).toFixed(1);
+  record.winRate = (
+    (record.wins / (record.wins + record.losses)) *
+    100
+  ).toFixed(1);
   fs.writeFileSync(RESULT_LOG, JSON.stringify(record, null, 2));
 }
 
@@ -180,9 +221,9 @@ function saveHistory(entry) {
   fs.writeFileSync(HISTORY_LOG, JSON.stringify(history, null, 2));
 }
 
-// ==================================
-// 🚀 Routes
-// ==================================
+// =======================
+// 🚀 ROUTES
+// =======================
 app.get("/api/picks", async (req, res) => {
   try {
     const data = await fetchOdds();
@@ -200,17 +241,22 @@ app.get("/api/featured", async (req, res) => {
     const gamePicks = await generateAIGamePicks(games);
     const props = await generateAIPropPicks();
 
-    const moneylineLock = gamePicks?.map((g) => g.mlPick)
-      ?.filter(Boolean)
-      ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
+    const moneylineLock =
+      gamePicks
+        ?.map((g) => g.mlPick)
+        ?.filter(Boolean)
+        ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
 
-    const spreadLock = gamePicks?.map((g) => g.spreadPick)
-      ?.filter(Boolean)
-      ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
+    const spreadLock =
+      gamePicks
+        ?.map((g) => g.spreadPick)
+        ?.filter(Boolean)
+        ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
 
-    const propLock = props.length > 0
-      ? props.sort((a, b) => b.confidence - a.confidence)[0]
-      : { player: "No props available", confidence: 0 };
+    const propLock =
+      props.length > 0
+        ? props.sort((a, b) => b.confidence - a.confidence)[0]
+        : { player: "No props available", confidence: 0 };
 
     const featured = {
       moneylineLock,
@@ -234,10 +280,12 @@ app.get("/api/featured", async (req, res) => {
 
 app.get("/api/record", (req, res) => res.json(record));
 app.get("/api/history", (req, res) => res.json(history));
-app.get("/", (req, res) => res.send("LockBox AI v7 ✅ Stable release"));
+app.get("/", (req, res) => res.send("LockBox AI ✅ Stable v8 Running"));
 
-// ==================================
-// 🖥️ Start Server
-// ==================================
+// =======================
+// 🖥️ START SERVER
+// =======================
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`✅ LockBox AI v7 running on port ${PORT}`));
+app.listen(PORT, () =>
+  console.log(`✅ LockBox AI v8 running on port ${PORT}`)
+);

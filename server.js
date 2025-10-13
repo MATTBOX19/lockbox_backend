@@ -10,6 +10,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ================================
+// 🔐 Config
+// ================================
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 const RESULT_LOG = "./results.json";
 const HISTORY_LOG = "./ai_history.json";
@@ -18,6 +21,9 @@ const REGIONS = "us";
 const MARKETS = "h2h,spreads,totals";
 const ODDS_CACHE_MS = 5 * 60 * 1000;
 
+// ================================
+// 🧾 Record & History
+// ================================
 let record = { wins: 0, losses: 0, winRate: 0 };
 if (fs.existsSync(RESULT_LOG))
   record = JSON.parse(fs.readFileSync(RESULT_LOG, "utf-8"));
@@ -27,7 +33,7 @@ if (fs.existsSync(HISTORY_LOG))
   history = JSON.parse(fs.readFileSync(HISTORY_LOG, "utf-8"));
 
 // ================================
-// 📈 Utility Helpers
+// 📈 Helpers
 // ================================
 const impliedProb = (ml) =>
   ml < 0 ? (-ml) / ((-ml) + 100) : 100 / (ml + 100);
@@ -52,7 +58,7 @@ async function fetchOdds() {
 }
 
 // ================================
-// 🧠 AI Picks (from v3 model)
+// 🧠 AI Picks
 // ================================
 async function generateAIGamePicks(games) {
   try {
@@ -156,7 +162,7 @@ async function generateAIGamePicks(games) {
 }
 
 // ================================
-// 🧩 Prop Picks (same as before)
+// 🧩 Prop Picks
 // ================================
 async function generateAIPropPicks() {
   try {
@@ -196,7 +202,7 @@ async function generateAIPropPicks() {
 }
 
 // ================================
-// 🧾 Record Management
+// 🧾 Record Tracking
 // ================================
 function updateRecord(win) {
   if (win) record.wins++;
@@ -216,31 +222,69 @@ function saveHistory(entry) {
 // ================================
 // 🚀 API Routes
 // ================================
+
+// ✅ Fix: Always return fresh picks
+app.get("/api/picks", async (req, res) => {
+  try {
+    const data = await fetchOdds();
+    const picks = await generateAIGamePicks(data);
+    if (!picks || picks.length === 0) {
+      console.warn("⚠️ No AI game picks available");
+      return res.status(200).json({ picks: [] });
+    }
+    res.json({ picks });
+  } catch (err) {
+    console.error("❌ /api/picks error:", err.message);
+    res.status(500).json({ picks: [] });
+  }
+});
+
+// ✅ Fix: Return locks + picks combo
 app.get("/api/featured", async (req, res) => {
   try {
     const games = await fetchOdds();
     const gamePicks = await generateAIGamePicks(games);
     const props = await generateAIPropPicks();
 
-    const moneylineLock = gamePicks.map((g) => g.mlPick).filter(Boolean)[0] || null;
-    const spreadLock = gamePicks.map((g) => g.spreadPick).filter(Boolean)[0] || null;
+    if (!gamePicks || gamePicks.length === 0) {
+      return res.status(200).json({
+        moneylineLock: null,
+        spreadLock: null,
+        propLock: { player: "No props available", confidence: 0 },
+        picks: [],
+      });
+    }
+
+    const moneylineLock = gamePicks
+      .map((g) => g.mlPick)
+      .filter(Boolean)
+      .sort((a, b) => b.confidence - a.confidence)[0];
+    const spreadLock = gamePicks
+      .map((g) => g.spreadPick)
+      .filter(Boolean)
+      .sort((a, b) => b.confidence - a.confidence)[0];
     const propLock =
       props.length > 0
         ? props.sort((a, b) => b.confidence - a.confidence)[0]
-        : { player: "No props available", market: "N/A", confidence: 0 };
+        : { player: "No props available", confidence: 0 };
 
-    const result = {
+    const featured = {
       moneylineLock,
       spreadLock,
       propLock,
+      picks: gamePicks,
       generatedAt: new Date().toISOString(),
     };
 
-    saveHistory(result);
-    res.json(result);
+    saveHistory(featured);
+    res.json(featured);
   } catch (err) {
     console.error("❌ /api/featured error:", err.message);
-    res.status(500).json({});
+    res.status(500).json({
+      moneylineLock: null,
+      spreadLock: null,
+      propLock: { player: "No props available", confidence: 0 },
+    });
   }
 });
 
@@ -260,7 +304,9 @@ app.get("/api/refresh-record", async (req, res) => {
         g.away_team.includes(h.moneylineLock?.pick)
       );
       if (game) {
-        const winner = game.scores.find((s) => s.score === Math.max(...game.scores.map((sc) => sc.score)))?.name;
+        const winner = game.scores.find(
+          (s) => s.score === Math.max(...game.scores.map((sc) => sc.score))
+        )?.name;
         const won = winner === h.moneylineLock?.pick;
         updateRecord(won);
         h.result = won ? "✅ WIN" : "❌ LOSS";

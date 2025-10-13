@@ -249,6 +249,47 @@ function saveHistory(entry) {
 }
 
 // =======================
+// 🏈 LIVE SCORES ENDPOINT
+// =======================
+app.get("/api/scores", async (req, res) => {
+  try {
+    const url = `https://api.the-odds-api.com/v4/sports/americanfootball_nfl/scores`;
+    const params = {
+      apiKey: process.env.ODDS_API_KEY,
+      daysFrom: 2, // past 2 days + live games
+    };
+
+    const { data } = await axios.get(url, { params });
+
+    // Format results for your app
+    const scores = (data || []).map((g) => ({
+      id: g.id,
+      sport_key: g.sport_key,
+      start_time: g.commence_time,
+      home_team: g.home_team,
+      away_team: g.away_team,
+      completed: g.completed,
+      scores: g.scores || [],
+      last_update: g.last_update,
+    }));
+
+    console.log(`🏈 Returned ${scores.length} NFL games (live + recent)`);
+
+    res.json({
+      totalGames: scores.length,
+      liveGames: scores.filter((g) => !g.completed).length,
+      games: scores,
+    });
+  } catch (err) {
+    console.error("❌ /api/scores error:", err.response?.data || err.message);
+    res.status(500).json({
+      error: "Failed to fetch scores.",
+      details: err.response?.data || err.message,
+    });
+  }
+});
+
+// =======================
 // 🚀 ROUTES
 // =======================
 app.get("/api/picks", async (req, res) => {

@@ -18,7 +18,7 @@ const RESULT_LOG = "./results.json";
 const SPORT = "americanfootball_nfl";
 const REGIONS = "us";
 const MARKETS = "h2h,spreads,totals";
-const ODDS_CACHE_MS = 5 * 60 * 1000;
+const ODDS_CACHE_MS = 5 * 60 * 1000; // 5 min cache
 
 let record = { wins: 0, losses: 0, winRate: 0 };
 if (fs.existsSync(RESULT_LOG)) {
@@ -53,19 +53,20 @@ async function fetchOdds() {
 }
 
 // ================================
-// 🧠 Enhanced LockBox AI Model v2
+// 🧠 Enhanced LockBox AI Model v2 (Stable)
 // ================================
 async function generateAIGamePicks(games) {
   try {
-    // Pull extra context data (injuries, weather, past stats)
-    const [weatherData, injuriesData] = await Promise.all([
-      axios
-        .get("https://nflweather.com/api/v1/games?week=current")
-        .catch(() => ({ data: [] })),
-      axios
-        .get("https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries")
-        .catch(() => ({ data: {} })),
-    ]);
+    // Safely load context (ESPN only, no breaking external calls)
+    let injuriesData = { sports: [] };
+    try {
+      const injuryRes = await axios.get(
+        "https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries"
+      );
+      injuriesData = injuryRes.data || { sports: [] };
+    } catch {
+      console.warn("⚠️ Injury feed unavailable.");
+    }
 
     return games
       .map((g) => {
@@ -91,42 +92,29 @@ async function generateAIGamePicks(games) {
         const awayProb = impliedProb(awayML);
         const edge = Math.abs(homeProb - awayProb);
 
-        // --- Weather impact
-        const weatherImpact = weatherData.data?.find(
-          (w) =>
-            w.home_team === home ||
-            w.away_team === away
-        );
-        const weatherAdj =
-          weatherImpact && /rain|snow|wind/i.test(weatherImpact.weather)
-            ? -0.05
-            : 0;
-
-        // --- Injury impact (using ESPN API)
+        // --- Injury adjustment (safe)
         const teamInjuries =
           injuriesData.sports?.[0]?.leagues?.[0]?.teams?.filter((t) =>
-            [home, away].some((n) => t.team.displayName.includes(n))
+            [home, away].some((n) =>
+              t.team.displayName?.toLowerCase()?.includes(n.toLowerCase())
+            )
           ) || [];
-        const injuryAdj = Math.max(
-          -0.1,
-          -0.02 * teamInjuries.length
-        );
+        const injuryAdj = Math.max(-0.05, -0.01 * teamInjuries.length);
 
-        // --- Moneyline Confidence (balanced model)
+        // --- Confidence models
         const mlConfidence = Math.round(
-          50 + (edge * 100 + weatherAdj * 50 + injuryAdj * 100)
+          55 + edge * 80 + injuryAdj * 100
         );
         const pick = homeProb > awayProb ? home : away;
 
-        // --- Spread Confidence (dynamic using price + edge)
-        let spreadConfidence = 50;
+        let spreadConfidence = 60;
         if (homeSpread && awaySpread) {
           const priceEdge =
             Math.abs(homeSpread.price - awaySpread.price) / 100;
           const pointEdge = Math.abs(homeSpread.point - awaySpread.point);
           spreadConfidence = Math.min(
             95,
-            55 + edge * 80 + priceEdge * 10 + pointEdge * 2
+            55 + edge * 70 + priceEdge * 10 + pointEdge * 3
           );
         }
 
@@ -185,7 +173,7 @@ async function generateAIPropPicks() {
         m.outcomes?.forEach((o) => {
           const confidence = Math.max(
             50,
-            100 - Math.abs(o.price) / 10 // higher odds = lower confidence
+            100 - Math.abs(o.price) / 10
           );
           props.push({
             matchup: `${game.away_team} @ ${game.home_team}`,
@@ -231,7 +219,7 @@ function updateRecord(win) {
 app.get("/api/picks", async (req, res) => {
   try {
     const data = await fetchOdds();
-    const picks = generateAIGamePicks(data);
+    const picks = await generateAIGamePicks(data);
     res.json({ picks });
   } catch (err) {
     console.error("❌ /api/picks error:", err.message);
@@ -253,24 +241,21 @@ app.get("/api/props", async (req, res) => {
 app.get("/api/featured", async (req, res) => {
   try {
     const games = await fetchOdds();
-    const gamePicks = generateAIGamePicks(games);
+    const gamePicks = await generateAIGamePicks(games);
     const props = await generateAIPropPicks();
 
-    // Find best moneyline pick
     const allML = gamePicks
       .map((g) => g.mlPick)
       .filter(Boolean)
       .sort((a, b) => b.confidence - a.confidence);
     const moneylineLock = allML[0] || null;
 
-    // Find best spread pick
     const allSpreads = gamePicks
       .map((g) => g.spreadPick)
       .filter(Boolean)
       .sort((a, b) => b.confidence - a.confidence);
     const spreadLock = allSpreads[0] || null;
 
-    // Find best prop pick
     const propLock =
       props.length > 0
         ? props.sort((a, b) => b.confidence - a.confidence)[0]

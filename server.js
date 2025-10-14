@@ -9,9 +9,6 @@ dotenv.config();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
-// =======================
-// ✅ CORS CONFIG
-// =======================
 app.use(
   cors({
     origin: [
@@ -22,367 +19,177 @@ app.use(
     credentials: true,
   })
 );
-
 app.use(express.json());
 
-// =======================
-// 🧩 DEBUG ROUTES
-// =======================
-app.get("/api/debug/env", (req, res) => {
-  res.json({
-    hasODDS_API_KEY: !!process.env.ODDS_API_KEY,
-    ODDS_REGIONS: process.env.ODDS_REGIONS || "not set",
-    STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY ? "✅ set" : "❌ missing",
-  });
-});
-
-app.get("/api/debug/props-raw", async (req, res) => {
-  try {
-    const url = `https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds`;
-    const params = {
-      apiKey: process.env.ODDS_API_KEY,
-      regions: "us",
-      markets: "h2h,spreads,totals",
-      oddsFormat: "american",
-      dateFormat: "iso",
-    };
-
-    const { data } = await axios.get(url, { params });
-    res.json({
-      totalGames: data?.length || 0,
-      sample: (data || []).slice(0, 3).map((g) => ({
-        matchup: `${g.away_team} @ ${g.home_team}`,
-        bookmaker: g.bookmakers?.[0]?.title || "none",
-        commence_time: g.commence_time,
-      })),
-    });
-  } catch (err) {
-    console.error("props-raw failed:", err.response?.data || err.message);
-    res.status(500).json({ error: err.response?.data || err.message });
-  }
-});
-
-// =======================
-// ⚙️ CONFIG
-// =======================
+// =======================================================
+// CONFIG
+// =======================================================
 const SPORT = "americanfootball_nfl";
 const REGIONS = "us";
 const MARKETS = "h2h,spreads,totals";
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
-const ODDS_CACHE_MS = 5 * 60 * 1000;
+const CACHE_MS = 5 * 60 * 1000;
 const RESULT_LOG = "./results.json";
 const HISTORY_LOG = "./ai_history.json";
 
-// =======================
-// 🧠 DATA CACHES
-// =======================
 let oddsCache = { data: null, ts: 0 };
 let record = { wins: 0, losses: 0, winRate: 0 };
 let history = [];
 
-if (fs.existsSync(RESULT_LOG))
-  record = JSON.parse(fs.readFileSync(RESULT_LOG));
-if (fs.existsSync(HISTORY_LOG))
-  history = JSON.parse(fs.readFileSync(HISTORY_LOG));
+if (fs.existsSync(RESULT_LOG)) record = JSON.parse(fs.readFileSync(RESULT_LOG));
+if (fs.existsSync(HISTORY_LOG)) history = JSON.parse(fs.readFileSync(HISTORY_LOG));
 
-// =======================
-// 🧮 HELPERS
-// =======================
+// =======================================================
+// HELPERS
+// =======================================================
 const impliedProb = (ml) =>
   ml < 0 ? (-ml) / ((-ml) + 100) : 100 / (ml + 100);
 
-/**
- * Fetch odds and keep ONLY pre-game markets.
- * We explicitly drop anything whose commence_time <= now
- * so no in-progress/live lines can influence picks.
- */
+function calcConfidence(a, b, type) {
+  const toProb = (odds) =>
+    odds > 0 ? 100 / (odds + 100) : Math.abs(odds) / (Math.abs(odds) + 100);
+  const diff = Math.abs(toProb(a) - toProb(b));
+  if (type === "moneyline") return Math.round(50 + diff * 100);
+  if (type === "spread") return Math.round(45 + diff * 80);
+  return Math.round(50 + Math.random() * 25);
+}
+
+// =======================================================
+// FETCH ODDS — PRE-GAME ONLY
+// =======================================================
 async function fetchOdds() {
-  const fresh = oddsCache.data && Date.now() - oddsCache.ts < ODDS_CACHE_MS;
+  const fresh = oddsCache.data && Date.now() - oddsCache.ts < CACHE_MS;
   if (fresh) return oddsCache.data;
 
   try {
-    const url = `https://api.the-odds-api.com/v4/sports/${SPORT}/odds`;
-    const res = await axios.get(url, {
-      params: {
-        apiKey: ODDS_API_KEY,
-        regions: REGIONS,
-        markets: MARKETS,
-        oddsFormat: "american",
-        dateFormat: "iso",
-      },
-    });
-
-    if (!Array.isArray(res.data)) throw new Error("Invalid odds response");
-
-    const now = new Date();
-
-    // ✅ Only keep games that have NOT started yet
-    const pregameOnly = res.data.filter((g) => new Date(g.commence_time) > now);
-
-    // Sort upcoming by start time (soonest first)
-    pregameOnly.sort(
-      (a, b) => new Date(a.commence_time) - new Date(b.commence_time)
+    const { data } = await axios.get(
+      `https://api.the-odds-api.com/v4/sports/${SPORT}/odds`,
+      {
+        params: {
+          apiKey: ODDS_API_KEY,
+          regions: REGIONS,
+          markets: MARKETS,
+          oddsFormat: "american",
+          dateFormat: "iso",
+        },
+      }
     );
 
-    oddsCache = { data: pregameOnly, ts: Date.now() };
-    console.log(`📊 Pulled ${pregameOnly.length} NFL pre-game matchups`);
-    return pregameOnly;
+    const now = new Date();
+    const soonestStart = new Date(now.getTime() + 15 * 60 * 1000); // 15-min buffer
+
+    const clean = (data || [])
+      .filter((g) => {
+        const start = new Date(g.commence_time);
+        const recentBook = g.bookmakers?.some((b) => {
+          const lu = new Date(b.last_update);
+          return now - lu < 3 * 60 * 60 * 1000; // within 3 hours → likely live
+        });
+        return start > soonestStart && !recentBook;
+      })
+      .sort((a, b) => new Date(a.commence_time) - new Date(b.commence_time));
+
+    oddsCache = { data: clean, ts: Date.now() };
+    console.log(`📊 Loaded ${clean.length} upcoming NFL games (pre-kickoff only)`);
+    return clean;
   } catch (err) {
     console.error("❌ fetchOdds failed:", err.message);
     return [];
   }
 }
 
-function calculateConfidence(homeOdds, awayOdds, lineType) {
-  const toProb = (odds) =>
-    odds > 0 ? 100 / (odds + 100) : Math.abs(odds) / (Math.abs(odds) + 100);
-
-  const homeProb = toProb(homeOdds);
-  const awayProb = toProb(awayOdds);
-  const diff = Math.abs(homeProb - awayProb);
-
-  if (lineType === "moneyline") return Math.round(50 + diff * 100);
-  if (lineType === "spread") return Math.round(45 + diff * 80);
-  return Math.round(50 + Math.random() * 25);
-}
-
-/**
- * ML + ATS logic with alignment:
- * - Choose ML favorite via implied probability.
- * - For spread, prefer the same side when the favorite has a negative line
- *   (or the dog has the positive line). If a book flips presentation,
- *   we still anchor to favorite vs dog based on ML and compare their lines.
- */
-async function generateAIGamePicks(games) {
-  if (!Array.isArray(games)) return [];
-
+// =======================================================
+// PICK LOGIC
+// =======================================================
+function buildGamePicks(games) {
   return games
     .map((g) => {
       const home = g.home_team;
       const away = g.away_team;
-      const bookmaker = g.bookmakers?.[0]?.title || "Unknown";
+      const book = g.bookmakers?.[0]?.title || "Unknown";
       const markets = g.bookmakers?.[0]?.markets || [];
 
       const h2h = markets.find((m) => m.key === "h2h");
       const spread = markets.find((m) => m.key === "spreads");
+      if (!h2h) return null;
 
-      const homeML = h2h?.outcomes?.find((o) => o.name === home)?.price;
-      const awayML = h2h?.outcomes?.find((o) => o.name === away)?.price;
+      const homeML = h2h.outcomes?.find((o) => o.name === home)?.price;
+      const awayML = h2h.outcomes?.find((o) => o.name === away)?.price;
       if (!homeML || !awayML) return null;
 
-      const mlConfidence = calculateConfidence(homeML, awayML, "moneyline");
-      const mlPickTeam =
-        impliedProb(homeML) > impliedProb(awayML) ? home : away;
-
-      const mlPick = {
-        type: "moneyline",
-        pick: mlPickTeam,
-        confidence: mlConfidence,
-        homeML,
-        awayML,
-      };
+      const mlConf = calcConfidence(homeML, awayML, "moneyline");
+      const mlPick = impliedProb(homeML) > impliedProb(awayML) ? home : away;
 
       let spreadPick = null;
+      const hs = spread?.outcomes?.find((o) => o.name === home);
+      const as = spread?.outcomes?.find((o) => o.name === away);
+      if (hs && as) {
+        const homeLine = parseFloat(hs.point);
+        const awayLine = parseFloat(as.point);
+        const homePrice = hs.price;
+        const awayPrice = as.price;
 
-      const homeSpread = spread?.outcomes?.find((o) => o.name === home);
-      const awaySpread = spread?.outcomes?.find((o) => o.name === away);
-
-      if (homeSpread && awaySpread) {
-        const homeLine = parseFloat(homeSpread.point);
-        const awayLine = parseFloat(awaySpread.point);
-        const homePrice = homeSpread.price;
-        const awayPrice = awaySpread.price;
-
-        // Define favorite/underdog by ML, then align with ATS direction
-        const favorite = mlPickTeam;
+        const favorite = mlPick;
         const underdog = favorite === home ? away : home;
-
-        const favoriteLine = favorite === home ? homeLine : awayLine;
-        const underdogLine = favorite === home ? awayLine : homeLine;
-
-        // If favorite has a negative spread, that aligns. If not, prefer dog.
-        const sameSide =
-          (favorite === home && favoriteLine < 0) ||
-          (favorite === away && favoriteLine < 0);
-
-        const chosenTeam = sameSide ? favorite : underdog;
-        const spreadConfidence = calculateConfidence(
-          homePrice,
-          awayPrice,
-          "spread"
-        );
+        const favLine = favorite === home ? homeLine : awayLine;
+        const sameSide = favLine < 0;
+        const chosen = sameSide ? favorite : underdog;
 
         spreadPick = {
           type: "spread",
-          pick: chosenTeam,
-          confidence: spreadConfidence,
-          homeLine,
-          awayLine,
-          homePrice,
-          awayPrice,
+          pick: chosen,
+          confidence: calcConfidence(homePrice, awayPrice, "spread"),
         };
       }
 
       return {
         matchup: `${away} @ ${home}`,
-        bookmaker,
-        mlPick,
+        bookmaker: book,
+        mlPick: { pick: mlPick, confidence: mlConf },
         spreadPick,
       };
     })
     .filter(Boolean);
 }
 
-// =======================
-// 🧩 PROP PICKS (Safe Fallback)
-// =======================
-async function generateAIPropPicks() {
-  try {
-    console.warn("⚠️ No prop data available on this plan.");
-    return [];
-  } catch {
-    return [];
-  }
-}
-
-app.get("/api/props", async (req, res) => {
-  try {
-    const props = await generateAIPropPicks();
-    if (!props.length) {
-      return res.json({
-        message: "No prop data available on your current plan.",
-        props: [],
-      });
-    }
-    res.json({ props });
-  } catch (err) {
-    console.error("❌ /api/props error:", err.message);
-    res.status(500).json({
-      message: "No prop data available.",
-      props: [],
-    });
-  }
-});
-
-// =======================
-// 📈 RECORD TRACKING
-// =======================
-function updateRecord(win) {
-  if (win) record.wins++;
-  else record.losses++;
-  record.winRate = (
-    (record.wins / (record.wins + record.losses)) *
-    100
-  ).toFixed(1);
-  fs.writeFileSync(RESULT_LOG, JSON.stringify(record, null, 2));
-}
-
-function saveHistory(entry) {
-  history.unshift(entry);
-  fs.writeFileSync(HISTORY_LOG, JSON.stringify(history, null, 2));
-}
-
-// =======================
-// 🏈 LIVE SCORES ENDPOINT
-// =======================
-app.get("/api/scores", async (req, res) => {
-  try {
-    const url = `https://api.the-odds-api.com/v4/sports/americanfootball_nfl/scores`;
-    const params = {
-      apiKey: process.env.ODDS_API_KEY,
-      daysFrom: 2, // live + recent
-    };
-
-    const { data } = await axios.get(url, { params });
-
-    const scores = (data || []).map((g) => ({
-      id: g.id,
-      sport_key: g.sport_key,
-      start_time: g.commence_time,
-      home_team: g.home_team,
-      away_team: g.away_team,
-      completed: g.completed,
-      scores: g.scores || [],
-      last_update: g.last_update,
-    }));
-
-    console.log(`🏈 Returned ${scores.length} NFL games (live + recent)`);
-
-    res.json({
-      totalGames: scores.length,
-      liveGames: scores.filter((g) => !g.completed).length,
-      games: scores,
-    });
-  } catch (err) {
-    console.error("❌ /api/scores error:", err.response?.data || err.message);
-    res.status(500).json({
-      error: "Failed to fetch scores.",
-      details: err.response?.data || err.message,
-    });
-  }
-});
-
-// =======================
-// 🚀 ROUTES
-// =======================
-app.get("/api/picks", async (req, res) => {
+// =======================================================
+// ROUTES
+// =======================================================
+app.get("/api/picks", async (_, res) => {
   try {
     const data = await fetchOdds();
-    const picks = await generateAIGamePicks(data);
-    res.json({ picks });
-  } catch (err) {
-    console.error("❌ /api/picks error:", err.message);
+    res.json({ picks: buildGamePicks(data) });
+  } catch (e) {
+    console.error(e.message);
     res.status(500).json({ picks: [] });
   }
 });
 
-app.get("/api/featured", async (req, res) => {
+app.get("/api/featured", async (_, res) => {
   try {
     const games = await fetchOdds();
-    const gamePicks = await generateAIGamePicks(games);
-    const props = await generateAIPropPicks();
-
-    const moneylineLock =
-      gamePicks?.map((g) => g.mlPick)?.filter(Boolean)
-        ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
-
-    const spreadLock =
-      gamePicks?.map((g) => g.spreadPick)?.filter(Boolean)
-        ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
-
-    const propLock =
-      props.length > 0
-        ? props.sort((a, b) => b.confidence - a.confidence)[0]
-        : { player: "No props available", confidence: 0 };
-
+    const picks = buildGamePicks(games);
+    const mlLock = picks
+      .map((p) => p.mlPick)
+      .sort((a, b) => b.confidence - a.confidence)[0];
+    const spLock = picks
+      .map((p) => p.spreadPick)
+      .filter(Boolean)
+      .sort((a, b) => b.confidence - a.confidence)[0];
     const featured = {
-      moneylineLock,
-      spreadLock,
-      propLock,
-      picks: gamePicks || [],
-      generatedAt: new Date().toISOString(),
-    };
-
-    saveHistory(featured);
-    res.json(featured);
-  } catch (err) {
-    console.error("❌ /api/featured error:", err.message);
-    res.status(500).json({
-      moneylineLock: null,
-      spreadLock: null,
+      moneylineLock: mlLock,
+      spreadLock: spLock,
       propLock: { player: "No props available", confidence: 0 },
-    });
+    };
+    res.json(featured);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
-app.get("/api/record", (req, res) => res.json(record));
-app.get("/api/history", (req, res) => res.json(history));
-app.get("/", (req, res) => res.send("LockBox AI ✅ Stable v12 (pregame only)"));
-
-// =======================
-// 🖥️ START SERVER
-// =======================
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, () =>
-  console.log(`✅ LockBox AI v12 running on port ${PORT}`)
+app.get("/", (_, res) =>
+  res.send("LockBox AI ✅ Stable v13 – Pre-Kickoff Filtered")
 );
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`✅ LockBox AI v13 running on port ${PORT}`));

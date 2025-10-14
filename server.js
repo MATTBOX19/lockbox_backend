@@ -25,17 +25,19 @@ let history = [];
 let todayPicks = null;
 let todayDate = null;
 
-// =======================
-// 📁 LOAD SAVED FILES
-// =======================
-if (fs.existsSync(RESULT_LOG))
-  record = JSON.parse(fs.readFileSync(RESULT_LOG));
-if (fs.existsSync(HISTORY_LOG))
-  history = JSON.parse(fs.readFileSync(HISTORY_LOG));
+// Load saved files safely
+if (fs.existsSync(RESULT_LOG)) {
+  try { record = JSON.parse(fs.readFileSync(RESULT_LOG)); } catch {}
+}
+if (fs.existsSync(HISTORY_LOG)) {
+  try { history = JSON.parse(fs.readFileSync(HISTORY_LOG)); } catch {}
+}
 if (fs.existsSync(DAILY_FILE)) {
-  const saved = JSON.parse(fs.readFileSync(DAILY_FILE));
-  todayPicks = saved.picks;
-  todayDate = saved.date;
+  try {
+    const saved = JSON.parse(fs.readFileSync(DAILY_FILE));
+    todayPicks = saved.picks;
+    todayDate = saved.date;
+  } catch {}
 }
 
 // =======================
@@ -60,7 +62,7 @@ function getEasternDateString(date = new Date()) {
 }
 
 // =======================
-// 🏈 FETCH UPCOMING GAMES (PRE-KICKOFF)
+// 🏈 FETCH UPCOMING GAMES
 // =======================
 async function fetchPreGameNFL() {
   try {
@@ -80,7 +82,7 @@ async function fetchPreGameNFL() {
     const now = new Date();
     const soonGames = (data || []).filter((g) => {
       const kickoff = new Date(g.commence_time);
-      return kickoff > now && (kickoff - now) / 1000 / 60 < 60 * 24; // next 24h only
+      return kickoff > now && (kickoff - now) / 1000 / 60 < 60 * 24;
     });
 
     console.log(`🏈 Found ${soonGames.length} upcoming NFL games`);
@@ -92,7 +94,7 @@ async function fetchPreGameNFL() {
 }
 
 // =======================
-// 🧠 GENERATE PICKS
+// 🧠 AI PICKS
 // =======================
 function generateAIGamePicks(games) {
   return games
@@ -138,16 +140,18 @@ function generateAIGamePicks(games) {
 // =======================
 async function updateRecord() {
   try {
+    if (!todayPicks || !todayPicks.length) return;
+
     const { data } = await axios.get(
       `https://api.the-odds-api.com/v4/sports/${SPORT}/scores`,
       { params: { apiKey: ODDS_API_KEY, daysFrom: 3 } }
     );
 
-    let wins = record.wins;
-    let losses = record.losses;
+    let wins = 0;
+    let losses = 0;
 
     (data || []).forEach((game) => {
-      if (game.completed && game.scores && todayPicks) {
+      if (game.completed && game.scores) {
         const pick = todayPicks.find(
           (p) => p.matchup === `${game.away_team} @ ${game.home_team}`
         );
@@ -176,32 +180,27 @@ async function updateRecord() {
 }
 
 // =======================
-// 📅 DAILY LOCK-IN
+// 📅 LOCK IN DAILY PICKS
 // =======================
 async function lockInTodayPicks() {
   const currentDate = getEasternDateString();
-  if (todayDate === currentDate && todayPicks) return todayPicks;
+  if (todayDate === currentDate && todayPicks?.length) return todayPicks;
 
   const games = await fetchPreGameNFL();
   if (!games.length) {
     console.log("⚠️ No upcoming games found for today.");
-    return null;
+    return [];
   }
 
   const picks = generateAIGamePicks(games);
 
-  const moneylineLock = picks
-    .slice()
-    .sort((a, b) => b.mlPick.confidence - a.mlPick.confidence)[0].mlPick;
-  const spreadLock = picks
-    .filter((p) => p.spreadPick)
-    .sort((a, b) => b.spreadPick.confidence - a.spreadPick.confidence)[0]
-    .spreadPick;
-
   const featured = {
     date: currentDate,
-    moneylineLock,
-    spreadLock,
+    moneylineLock: picks.sort((a, b) => b.mlPick.confidence - a.mlPick.confidence)[0].mlPick,
+    spreadLock: picks
+      .filter((p) => p.spreadPick)
+      .sort((a, b) => b.spreadPick.confidence - a.spreadPick.confidence)[0]
+      ?.spreadPick,
     propLock: { player: "No props available", confidence: 0 },
     picks,
   };
@@ -219,20 +218,19 @@ async function lockInTodayPicks() {
 // 🚀 ROUTES
 // =======================
 app.get("/api/featured", async (req, res) => {
-  const data = await lockInTodayPicks();
-  await updateRecord();
-  res.json(data);
-});
-
-app.get("/api/picks", async (req, res) => {
-  const data = await lockInTodayPicks();
-  res.json(data?.picks || []);
+  try {
+    const data = await lockInTodayPicks();
+    await updateRecord();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get("/api/record", (req, res) => res.json(record));
 
 app.get("/", (req, res) =>
-  res.send("✅ LockBox AI v18 — Pre-Game Locks + Live Record Tracker")
+  res.send("✅ LockBox AI v19 — Stable pre-game locks + live record tracking")
 );
 
 // =======================
@@ -240,5 +238,5 @@ app.get("/", (req, res) =>
 // =======================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () =>
-  console.log(`✅ LockBox AI v18 running on port ${PORT}`)
+  console.log(`✅ LockBox AI v19 running on port ${PORT}`)
 );

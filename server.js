@@ -173,37 +173,44 @@ async function generateAIGamePicks(games) {
       const awaySpread = spread?.outcomes?.find((o) => o.name === away);
 
       const mlConfidence = calculateConfidence(homeML, awayML, "moneyline");
+      const mlPickTeam =
+        impliedProb(homeML) > impliedProb(awayML) ? home : away;
+
       const mlPick = {
         type: "moneyline",
-        pick: impliedProb(homeML) > impliedProb(awayML) ? home : away,
+        pick: mlPickTeam,
         confidence: mlConfidence,
         homeML,
         awayML,
       };
 
-      // 🧠 Smart Spread Pick Logic
+      // 🧠 Smarter Spread logic (ATS direction check)
       let spreadPick = null;
       if (homeSpread && awaySpread) {
-        const homeLine = homeSpread.point;
-        const awayLine = awaySpread.point;
+        const homeLine = parseFloat(homeSpread.point);
+        const awayLine = parseFloat(awaySpread.point);
         const homePrice = homeSpread.price;
         const awayPrice = awaySpread.price;
 
-        // Compare line advantage with odds
-        const betterValue =
-          Math.abs(homeLine) < Math.abs(awayLine)
-            ? home
-            : Math.abs(homeLine) > Math.abs(awayLine)
-            ? away
-            : Math.abs(homePrice) < Math.abs(awayPrice)
-            ? home
-            : away;
+        // pick team with better line advantage AND aligns with ML favorite
+        const favorite = mlPickTeam;
+        const underdog = favorite === home ? away : home;
 
+        const favoriteLine =
+          favorite === home ? homeLine : awayLine;
+        const underdogLine =
+          favorite === home ? awayLine : homeLine;
+
+        const sameSide =
+          (favorite === home && favoriteLine < 0) ||
+          (favorite === away && favoriteLine > 0);
+
+        const chosenTeam = sameSide ? favorite : underdog;
         const spreadConfidence = calculateConfidence(homePrice, awayPrice, "spread");
 
         spreadPick = {
           type: "spread",
-          pick: betterValue,
+          pick: chosenTeam,
           confidence: spreadConfidence,
           homeLine,
           awayLine,
@@ -367,12 +374,12 @@ app.get("/api/featured", async (req, res) => {
 
 app.get("/api/record", (req, res) => res.json(record));
 app.get("/api/history", (req, res) => res.json(history));
-app.get("/", (req, res) => res.send("LockBox AI ✅ Stable v10 Running"));
+app.get("/", (req, res) => res.send("LockBox AI ✅ Stable v11 Running"));
 
 // =======================
 // 🖥️ START SERVER
 // =======================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () =>
-  console.log(`✅ LockBox AI v10 running on port ${PORT}`)
+  console.log(`✅ LockBox AI v11 running on port ${PORT}`)
 );

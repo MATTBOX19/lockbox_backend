@@ -57,9 +57,7 @@ app.get("/api/debug/props-raw", async (req, res) => {
     });
   } catch (err) {
     console.error("props-raw failed:", err.response?.data || err.message);
-    res
-      .status(500)
-      .json({ error: err.response?.data || err.message });
+    res.status(500).json({ error: err.response?.data || err.message });
   }
 });
 
@@ -129,12 +127,8 @@ function calculateConfidence(homeOdds, awayOdds, lineType) {
   const awayProb = toProb(awayOdds);
   const diff = Math.abs(homeProb - awayProb);
 
-  if (lineType === "moneyline") {
-    return Math.round(50 + diff * 100);
-  }
-  if (lineType === "spread") {
-    return Math.round(40 + diff * 80);
-  }
+  if (lineType === "moneyline") return Math.round(50 + diff * 100);
+  if (lineType === "spread") return Math.round(40 + diff * 80);
   return Math.round(50 + Math.random() * 25);
 }
 
@@ -202,15 +196,13 @@ async function generateAIGamePicks(games) {
 // =======================
 async function generateAIPropPicks() {
   try {
-    // Odds API plan doesn't support player props yet
     console.warn("⚠️ No prop data available on this plan.");
-    return []; // return empty list so frontend can handle gracefully
+    return [];
   } catch {
     return [];
   }
 }
 
-// ✅ Add this clean endpoint for the frontend
 app.get("/api/props", async (req, res) => {
   try {
     const props = await generateAIPropPicks();
@@ -260,8 +252,6 @@ app.get("/api/scores", async (req, res) => {
     };
 
     const { data } = await axios.get(url, { params });
-
-    // Format results for your app
     const scores = (data || []).map((g) => ({
       id: g.id,
       sport_key: g.sport_key,

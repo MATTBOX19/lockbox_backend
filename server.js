@@ -90,6 +90,7 @@ if (fs.existsSync(HISTORY_LOG))
 const impliedProb = (ml) =>
   ml < 0 ? (-ml) / ((-ml) + 100) : 100 / (ml + 100);
 
+// ✅ Filter for today/live games using local time ±1 day window
 async function fetchOdds() {
   const fresh = oddsCache.data && Date.now() - oddsCache.ts < ODDS_CACHE_MS;
   if (fresh) return oddsCache.data;
@@ -107,9 +108,28 @@ async function fetchOdds() {
     });
 
     if (!Array.isArray(res.data)) throw new Error("Invalid odds response");
-    oddsCache = { data: res.data, ts: Date.now() };
-    console.log(`📊 Pulled ${res.data.length} NFL games`);
-    return res.data;
+
+    const now = new Date();
+    const startWindow = new Date(now);
+    startWindow.setDate(startWindow.getDate() - 1);
+    const endWindow = new Date(now);
+    endWindow.setDate(endWindow.getDate() + 1);
+
+    const filteredGames = res.data.filter((g) => {
+      const gameDate = new Date(g.commence_time);
+      return (
+        (gameDate >= startWindow && gameDate <= endWindow) ||
+        g.completed === false
+      );
+    });
+
+    filteredGames.sort(
+      (a, b) => new Date(a.commence_time) - new Date(b.commence_time)
+    );
+
+    oddsCache = { data: filteredGames, ts: Date.now() };
+    console.log(`📊 Pulled ${filteredGames.length} NFL games (within ±1 day window)`);
+    return filteredGames;
   } catch (err) {
     console.error("❌ fetchOdds failed:", err.message);
     return [];
@@ -248,7 +268,7 @@ app.get("/api/scores", async (req, res) => {
     const url = `https://api.the-odds-api.com/v4/sports/americanfootball_nfl/scores`;
     const params = {
       apiKey: process.env.ODDS_API_KEY,
-      daysFrom: 2, // past 2 days + live games
+      daysFrom: 2,
     };
 
     const { data } = await axios.get(url, { params });
@@ -299,17 +319,20 @@ app.get("/api/featured", async (req, res) => {
     const gamePicks = await generateAIGamePicks(games);
     const props = await generateAIPropPicks();
 
-    const moneylineLock = gamePicks?.map((g) => g.mlPick)
+    const moneylineLock = gamePicks
+      ?.map((g) => g.mlPick)
       ?.filter(Boolean)
       ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
 
-    const spreadLock = gamePicks?.map((g) => g.spreadPick)
+    const spreadLock = gamePicks
+      ?.map((g) => g.spreadPick)
       ?.filter(Boolean)
       ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
 
-    const propLock = props.length > 0
-      ? props.sort((a, b) => b.confidence - a.confidence)[0]
-      : { player: "No props available", confidence: 0 };
+    const propLock =
+      props.length > 0
+        ? props.sort((a, b) => b.confidence - a.confidence)[0]
+        : { player: "No props available", confidence: 0 };
 
     const featured = {
       moneylineLock,
@@ -333,12 +356,12 @@ app.get("/api/featured", async (req, res) => {
 
 app.get("/api/record", (req, res) => res.json(record));
 app.get("/api/history", (req, res) => res.json(history));
-app.get("/", (req, res) => res.send("LockBox AI ✅ Stable v8 Running"));
+app.get("/", (req, res) => res.send("LockBox AI ✅ Stable v9 Running"));
 
 // =======================
 // 🖥️ START SERVER
 // =======================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () =>
-  console.log(`✅ LockBox AI v8 running on port ${PORT}`)
+  console.log(`✅ LockBox AI v9 running on port ${PORT}`)
 );

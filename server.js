@@ -32,12 +32,12 @@ const SPORT = "americanfootball_nfl";
 const REGIONS = "us";
 const MARKETS = "h2h,spreads,totals";
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
-const ODDS_CACHE_MS = 10 * 60 * 1000; // 10 minutes
+const ODDS_CACHE_MS = 10 * 60 * 1000; // 10 min
 const RESULT_LOG = "./results.json";
 const HISTORY_LOG = "./ai_history.json";
 
 // =======================
-// 🧠 DATA CACHES
+// 🧠 DATA CACHE
 // =======================
 let oddsCache = { data: null, ts: 0 };
 
@@ -65,11 +65,10 @@ async function fetchOdds() {
 
     if (!Array.isArray(res.data)) throw new Error("Invalid odds response");
 
-    // Filter: show only upcoming or today’s games (not old or live)
     const now = new Date();
     const filtered = res.data.filter((g) => {
       const gameTime = new Date(g.commence_time);
-      return gameTime > now && gameTime - now < 7 * 24 * 60 * 60 * 1000; // within 7 days
+      return gameTime - now > -2 * 60 * 60 * 1000 && gameTime - now < 7 * 24 * 60 * 60 * 1000;
     });
 
     oddsCache = { data: filtered, ts: Date.now() };
@@ -84,16 +83,16 @@ async function fetchOdds() {
 function calculateConfidence(homeOdds, awayOdds, lineType) {
   const toProb = (odds) =>
     odds > 0 ? 100 / (odds + 100) : Math.abs(odds) / (Math.abs(odds) + 100);
-
-  const homeProb = toProb(homeOdds);
-  const awayProb = toProb(awayOdds);
-  const diff = Math.abs(homeProb - awayProb);
-
+  const diff = Math.abs(toProb(homeOdds) - toProb(awayOdds));
   if (lineType === "moneyline") return Math.round(50 + diff * 100);
-  if (lineType === "spread") return Math.round(40 + diff * 80);
-  return Math.round(50 + Math.random() * 25);
+  if (lineType === "spread") return Math.round(45 + diff * 90);
+  if (lineType === "total") return Math.round(40 + diff * 100);
+  return 55;
 }
 
+// =======================
+// 🧠 AI GAME PICKS
+// =======================
 async function generateAIGamePicks(games) {
   if (!Array.isArray(games)) return [];
 
@@ -106,27 +105,26 @@ async function generateAIGamePicks(games) {
 
       const h2h = markets.find((m) => m.key === "h2h");
       const spread = markets.find((m) => m.key === "spreads");
+      const total = markets.find((m) => m.key === "totals");
 
       const homeML = h2h?.outcomes?.find((o) => o.name === home)?.price;
       const awayML = h2h?.outcomes?.find((o) => o.name === away)?.price;
-
       if (!homeML || !awayML) return null;
 
-      const mlConfidence = calculateConfidence(homeML, awayML, "moneyline");
+      const mlConf = calculateConfidence(homeML, awayML, "moneyline");
       const mlPick = {
         type: "moneyline",
         pick: impliedProb(homeML) > impliedProb(awayML) ? home : away,
-        confidence: mlConfidence,
+        confidence: mlConf,
         homeML,
         awayML,
       };
 
+      let spreadPick = null;
       const homeSpread = spread?.outcomes?.find((o) => o.name === home);
       const awaySpread = spread?.outcomes?.find((o) => o.name === away);
-      let spreadPick = null;
-
       if (homeSpread && awaySpread) {
-        const spreadConfidence = calculateConfidence(
+        const spreadConf = calculateConfidence(
           homeSpread.price,
           awaySpread.price,
           "spread"
@@ -137,17 +135,48 @@ async function generateAIGamePicks(games) {
             Math.abs(homeSpread.price) < Math.abs(awaySpread.price)
               ? home
               : away,
-          confidence: spreadConfidence,
-          homeSpread,
-          awaySpread,
+          confidence: spreadConf,
+          line:
+            Math.abs(homeSpread.point) <= Math.abs(awaySpread.point)
+              ? homeSpread.point
+              : awaySpread.point,
         };
       }
+
+      let totalPick = null;
+      if (total && total.outcomes?.length >= 2) {
+        const over = total.outcomes.find((o) =>
+          o.name.toLowerCase().includes("over")
+        );
+        const under = total.outcomes.find((o) =>
+          o.name.toLowerCase().includes("under")
+        );
+        if (over && under) {
+          const totConf = calculateConfidence(over.price, under.price, "total");
+          totalPick = {
+            type: "total",
+            pick:
+              Math.abs(over.price) < Math.abs(under.price)
+                ? "Over"
+                : "Under",
+            line: over.point || under.point,
+            confidence: totConf,
+          };
+        }
+      }
+
+      // determine recommended play
+      const allPicks = [mlPick, spreadPick, totalPick].filter(Boolean);
+      const recommended =
+        allPicks.sort((a, b) => b.confidence - a.confidence)[0] || mlPick;
 
       return {
         matchup: `${away} @ ${home}`,
         bookmaker,
         mlPick,
         spreadPick,
+        totalPick,
+        recommendedPlay: recommended,
         commence_time: g.commence_time,
       };
     })
@@ -161,7 +190,7 @@ app.get("/api/picks", async (req, res) => {
   try {
     const data = await fetchOdds();
     const picks = await generateAIGamePicks(data);
-    res.json({ picks });
+    res.json({ picks, generatedAt: new Date().toISOString() });
   } catch (err) {
     console.error("❌ /api/picks error:", err.message);
     res.status(500).json({ picks: [] });
@@ -174,7 +203,6 @@ app.get("/api/scores", async (req, res) => {
     const { data } = await axios.get(url, {
       params: { apiKey: ODDS_API_KEY, daysFrom: 2 },
     });
-
     const scores = (data || []).map((g) => ({
       id: g.id,
       start_time: g.commence_time,
@@ -184,7 +212,6 @@ app.get("/api/scores", async (req, res) => {
       scores: g.scores || [],
       last_update: g.last_update,
     }));
-
     res.json({
       totalGames: scores.length,
       liveGames: scores.filter((g) => !g.completed).length,
@@ -196,9 +223,9 @@ app.get("/api/scores", async (req, res) => {
   }
 });
 
-app.get("/", (req, res) => res.send("LockBox AI ✅ Stable Backend Running"));
+app.get("/", (req, res) => res.send("LockBox AI v21 ✅ Pro Backend Running"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () =>
-  console.log(`✅ LockBox AI Backend running on port ${PORT}`)
+  console.log(`✅ LockBox AI Backend v21 running on port ${PORT}`)
 );

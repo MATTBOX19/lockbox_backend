@@ -9,9 +9,6 @@ dotenv.config();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const app = express();
 
-// =======================
-// ✅ CORS CONFIG
-// =======================
 app.use(
   cors({
     origin: [
@@ -24,9 +21,6 @@ app.use(
 );
 app.use(express.json());
 
-// =======================
-// ⚙️ CONFIG
-// =======================
 const SPORT = "americanfootball_nfl";
 const REGIONS = "us";
 const MARKETS = "h2h,spreads,totals";
@@ -35,9 +29,6 @@ const RESULT_LOG = "./results.json";
 const HISTORY_LOG = "./ai_history.json";
 const DAILY_FILE = "./today_picks.json";
 
-// =======================
-// 🧠 STATE
-// =======================
 let record = { wins: 0, losses: 0, winRate: 0 };
 let history = [];
 let todayPicks = null;
@@ -53,9 +44,6 @@ if (fs.existsSync(DAILY_FILE)) {
   todayDate = saved.date;
 }
 
-// =======================
-// 🧮 HELPERS
-// =======================
 const impliedProb = (ml) =>
   ml < 0 ? (-ml) / ((-ml) + 100) : 100 / (ml + 100);
 
@@ -69,15 +57,15 @@ function calcConfidence(a, b, type) {
 }
 
 function getEasternDateString(date = new Date()) {
-  const offset = -5; // EST
+  const offset = -5;
   const local = new Date(date.getTime() + offset * 60 * 60 * 1000);
   return local.toISOString().split("T")[0];
 }
 
 // =======================
-// 🏈 FETCH ODDS — TODAY ONLY
+// 🏈 FETCH ODDS (Live + Upcoming Games)
 // =======================
-async function fetchTodaysOdds() {
+async function fetchNFLGames() {
   try {
     const { data } = await axios.get(
       `https://api.the-odds-api.com/v4/sports/${SPORT}/odds`,
@@ -94,31 +82,28 @@ async function fetchTodaysOdds() {
 
     const now = new Date();
     const todayEST = getEasternDateString(now);
-    const soonestStart = new Date(now.getTime() + 10 * 60 * 1000);
 
-    const filtered = (data || [])
+    // Filter: games from today through Sunday
+    const games = (data || [])
       .filter((g) => {
         const gameDate = getEasternDateString(new Date(g.commence_time));
+        const gameTime = new Date(g.commence_time);
+        // keep if live OR upcoming this week
         return (
-          gameDate === todayEST &&
-          new Date(g.commence_time) > soonestStart
+          gameDate >= todayEST &&
+          gameTime.getTime() > now.getTime() - 3 * 60 * 60 * 1000
         );
       })
-      .sort(
-        (a, b) => new Date(a.commence_time) - new Date(b.commence_time)
-      );
+      .sort((a, b) => new Date(a.commence_time) - new Date(b.commence_time));
 
-    console.log(`📊 Found ${filtered.length} NFL games for ${todayEST}`);
-    return filtered;
+    console.log(`📊 Found ${games.length} live/upcoming NFL games`);
+    return games;
   } catch (err) {
-    console.error("❌ fetchTodaysOdds failed:", err.message);
+    console.error("❌ fetchNFLGames failed:", err.message);
     return [];
   }
 }
 
-// =======================
-// 🧠 AI PICKS
-// =======================
 function generateAIGamePicks(games) {
   return games
     .map((g) => {
@@ -142,10 +127,10 @@ function generateAIGamePicks(games) {
       const hs = spread?.outcomes?.find((o) => o.name === home);
       const as = spread?.outcomes?.find((o) => o.name === away);
       if (hs && as) {
-        const sameSide = parseFloat(hs.point) < 0;
-        const chosen = sameSide ? home : away;
         const spreadConf = calcConfidence(hs.price, as.price, "spread");
-        spreadPick = { type: "spread", pick: chosen, confidence: spreadConf };
+        const chosen =
+          Math.abs(hs.point) <= Math.abs(as.point) ? home : away;
+        spreadPick = { pick: chosen, confidence: spreadConf };
       }
 
       return {
@@ -158,13 +143,10 @@ function generateAIGamePicks(games) {
     .filter(Boolean);
 }
 
-// =======================
-// 💾 LOCK + SAVE DAILY PICKS
-// =======================
 async function generateAndSaveTodayPicks() {
-  const games = await fetchTodaysOdds();
+  const games = await fetchNFLGames();
   if (!games.length) {
-    console.log("⚠️ No NFL games today — skipping lock-in.");
+    console.log("⚠️ No NFL games this week — skipping lock-in.");
     return null;
   }
 
@@ -194,14 +176,11 @@ async function generateAndSaveTodayPicks() {
   return featured;
 }
 
-// =======================
-// 🏆 RECORD TRACKING
-// =======================
 async function updateRecord() {
   try {
     const { data } = await axios.get(
       "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/scores",
-      { params: { apiKey: ODDS_API_KEY, daysFrom: 2 } }
+      { params: { apiKey: ODDS_API_KEY, daysFrom: 3 } }
     );
 
     let wins = record.wins;
@@ -236,9 +215,6 @@ async function updateRecord() {
   }
 }
 
-// =======================
-// 🚀 ROUTES
-// =======================
 app.get("/api/featured", async (req, res) => {
   const currentDate = getEasternDateString();
   if (todayDate !== currentDate || !todayPicks) {
@@ -259,13 +235,10 @@ app.get("/api/picks", async (req, res) => {
 app.get("/api/record", (req, res) => res.json(record));
 
 app.get("/", (req, res) =>
-  res.send("LockBox AI ✅ v15 — Today's Slate Only + Daily Locks")
+  res.send("LockBox AI ✅ v16 — Live + Upcoming NFL Games + Weekly Fallback")
 );
 
-// =======================
-// 🖥️ START SERVER
-// =======================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () =>
-  console.log(`✅ LockBox AI v15 running on port ${PORT}`)
+  console.log(`✅ LockBox AI v16 running on port ${PORT}`)
 );

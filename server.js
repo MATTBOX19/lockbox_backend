@@ -90,7 +90,6 @@ if (fs.existsSync(HISTORY_LOG))
 const impliedProb = (ml) =>
   ml < 0 ? (-ml) / ((-ml) + 100) : 100 / (ml + 100);
 
-// ✅ Filter for today/live games using local time ±1 day window
 async function fetchOdds() {
   const fresh = oddsCache.data && Date.now() - oddsCache.ts < ODDS_CACHE_MS;
   if (fresh) return oddsCache.data;
@@ -148,7 +147,7 @@ function calculateConfidence(homeOdds, awayOdds, lineType) {
   const diff = Math.abs(homeProb - awayProb);
 
   if (lineType === "moneyline") return Math.round(50 + diff * 100);
-  if (lineType === "spread") return Math.round(40 + diff * 80);
+  if (lineType === "spread") return Math.round(45 + diff * 80);
   return Math.round(50 + Math.random() * 25);
 }
 
@@ -170,6 +169,9 @@ async function generateAIGamePicks(games) {
 
       if (!homeML || !awayML) return null;
 
+      const homeSpread = spread?.outcomes?.find((o) => o.name === home);
+      const awaySpread = spread?.outcomes?.find((o) => o.name === away);
+
       const mlConfidence = calculateConfidence(homeML, awayML, "moneyline");
       const mlPick = {
         type: "moneyline",
@@ -179,25 +181,34 @@ async function generateAIGamePicks(games) {
         awayML,
       };
 
-      const homeSpread = spread?.outcomes?.find((o) => o.name === home);
-      const awaySpread = spread?.outcomes?.find((o) => o.name === away);
+      // 🧠 Smart Spread Pick Logic
       let spreadPick = null;
-
       if (homeSpread && awaySpread) {
-        const spreadConfidence = calculateConfidence(
-          homeSpread.price,
-          awaySpread.price,
-          "spread"
-        );
+        const homeLine = homeSpread.point;
+        const awayLine = awaySpread.point;
+        const homePrice = homeSpread.price;
+        const awayPrice = awaySpread.price;
+
+        // Compare line advantage with odds
+        const betterValue =
+          Math.abs(homeLine) < Math.abs(awayLine)
+            ? home
+            : Math.abs(homeLine) > Math.abs(awayLine)
+            ? away
+            : Math.abs(homePrice) < Math.abs(awayPrice)
+            ? home
+            : away;
+
+        const spreadConfidence = calculateConfidence(homePrice, awayPrice, "spread");
+
         spreadPick = {
           type: "spread",
-          pick:
-            Math.abs(homeSpread.price) < Math.abs(awaySpread.price)
-              ? home
-              : away,
+          pick: betterValue,
           confidence: spreadConfidence,
-          homeSpread,
-          awaySpread,
+          homeLine,
+          awayLine,
+          homePrice,
+          awayPrice,
         };
       }
 
@@ -356,12 +367,12 @@ app.get("/api/featured", async (req, res) => {
 
 app.get("/api/record", (req, res) => res.json(record));
 app.get("/api/history", (req, res) => res.json(history));
-app.get("/", (req, res) => res.send("LockBox AI ✅ Stable v9 Running"));
+app.get("/", (req, res) => res.send("LockBox AI ✅ Stable v10 Running"));
 
 // =======================
 // 🖥️ START SERVER
 // =======================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () =>
-  console.log(`✅ LockBox AI v9 running on port ${PORT}`)
+  console.log(`✅ LockBox AI v10 running on port ${PORT}`)
 );

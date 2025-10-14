@@ -51,8 +51,7 @@ function calculateConfidence(homeOdds, awayOdds) {
 function selectBestPick(moneyline, spread) {
   const mlConf = moneyline?.confidence || 0;
   const spConf = spread?.confidence || 0;
-  const margin = 3; // spread must beat ML by 3 pts minimum
-
+  const margin = 3; // spread must exceed ML by 3 pts to be "better"
   if (spConf > mlConf + margin) {
     return { type: "Spread", pick: spread.pick, confidence: spConf };
   }
@@ -60,7 +59,7 @@ function selectBestPick(moneyline, spread) {
 }
 
 // =======================
-// 🧠 AI PICK GENERATOR
+// 🧠 FETCH + GENERATE AI PICKS
 // =======================
 async function fetchOdds(sportKey) {
   try {
@@ -76,8 +75,19 @@ async function fetchOdds(sportKey) {
     });
 
     const games = Array.isArray(res.data) ? res.data : [];
-    console.log(`📊 Pulled ${games.length} games for ${sportKey}`);
-    return games;
+    const now = new Date();
+
+    // 🧹 Filter out games that have already started
+    const pregameOnly = games.filter((g) => {
+      const start = new Date(g.commence_time);
+      return start > now; // keep only games that haven't started yet
+    });
+
+    console.log(
+      `📊 Pulled ${pregameOnly.length}/${games.length} upcoming games for ${sportKey}`
+    );
+
+    return pregameOnly;
   } catch (err) {
     console.error(`❌ fetchOdds failed for ${sportKey}:`, err.message);
     return [];
@@ -106,7 +116,7 @@ function generateAIPicks(games) {
       const mlPick =
         impliedProb(homeML) > impliedProb(awayML) ? home : away;
 
-      // SPREAD logic with discount (so it's not always higher)
+      // SPREAD logic with realism discount
       let spreadPick = null;
       let spreadConfidence = 0;
 
@@ -119,7 +129,7 @@ function generateAIPicks(games) {
             Math.max(
               calculateConfidence(homeSpread.price, awaySpread.price) - 10,
               40
-            ); // reduce spread confidence realism
+            );
           spreadPick =
             Math.abs(homeSpread.price) < Math.abs(awaySpread.price)
               ? home
@@ -141,6 +151,7 @@ function generateAIPicks(games) {
         moneyline,
         spread: spreadObj,
         bestPick: best,
+        start_time: g.commence_time,
       };
     })
     .filter(Boolean);
@@ -178,6 +189,7 @@ app.get("/api/scores", async (req, res) => {
       away_team: g.away_team,
       completed: g.completed,
       scores: g.scores || [],
+      start_time: g.commence_time,
     }));
     res.json({ totalGames: scores.length, games: scores });
   } catch (err) {
@@ -188,7 +200,7 @@ app.get("/api/scores", async (req, res) => {
 
 // HEALTH CHECK
 app.get("/", (req, res) =>
-  res.send("🏈 LockBox AI v23 — Multi-Sport Backend with Balanced Confidence Active")
+  res.send("🏈 LockBox AI v24 — Multi-Sport Backend | Pre-game Only Picks ✅")
 );
 
 // =======================
@@ -196,5 +208,5 @@ app.get("/", (req, res) =>
 // =======================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () =>
-  console.log(`✅ LockBox AI v23 running on port ${PORT}`)
+  console.log(`✅ LockBox AI v24 running on port ${PORT}`)
 );

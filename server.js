@@ -68,17 +68,16 @@ function calcConfidence(a, b, type) {
   return Math.round(50 + Math.random() * 25);
 }
 
-function getEasternDateString() {
-  const date = new Date();
+function getEasternDateString(date = new Date()) {
   const offset = -5; // EST
   const local = new Date(date.getTime() + offset * 60 * 60 * 1000);
   return local.toISOString().split("T")[0];
 }
 
 // =======================
-// 🏈 FETCH ODDS (pregame only)
+// 🏈 FETCH ODDS — TODAY ONLY
 // =======================
-async function fetchOdds() {
+async function fetchTodaysOdds() {
   try {
     const { data } = await axios.get(
       `https://api.the-odds-api.com/v4/sports/${SPORT}/odds`,
@@ -94,23 +93,31 @@ async function fetchOdds() {
     );
 
     const now = new Date();
+    const todayEST = getEasternDateString(now);
     const soonestStart = new Date(now.getTime() + 10 * 60 * 1000);
-    const pregameOnly = (data || [])
-      .filter((g) => new Date(g.commence_time) > soonestStart)
+
+    const filtered = (data || [])
+      .filter((g) => {
+        const gameDate = getEasternDateString(new Date(g.commence_time));
+        return (
+          gameDate === todayEST &&
+          new Date(g.commence_time) > soonestStart
+        );
+      })
       .sort(
         (a, b) => new Date(a.commence_time) - new Date(b.commence_time)
       );
 
-    console.log(`📊 Found ${pregameOnly.length} pregame NFL matchups`);
-    return pregameOnly;
+    console.log(`📊 Found ${filtered.length} NFL games for ${todayEST}`);
+    return filtered;
   } catch (err) {
-    console.error("❌ fetchOdds failed:", err.message);
+    console.error("❌ fetchTodaysOdds failed:", err.message);
     return [];
   }
 }
 
 // =======================
-// 🧠 AI GAME PICKS
+// 🧠 AI PICKS
 // =======================
 function generateAIGamePicks(games) {
   return games
@@ -155,28 +162,26 @@ function generateAIGamePicks(games) {
 // 💾 LOCK + SAVE DAILY PICKS
 // =======================
 async function generateAndSaveTodayPicks() {
-  const games = await fetchOdds();
+  const games = await fetchTodaysOdds();
+  if (!games.length) {
+    console.log("⚠️ No NFL games today — skipping lock-in.");
+    return null;
+  }
+
   const picks = generateAIGamePicks(games);
-
-  const moneylineLock =
-    picks
-      ?.map((g) => g.mlPick)
-      ?.filter(Boolean)
-      ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
-
-  const spreadLock =
-    picks
-      ?.map((g) => g.spreadPick)
-      ?.filter(Boolean)
-      ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
-
-  const propLock = { player: "No props available", confidence: 0 };
+  const moneylineLock = picks.sort(
+    (a, b) => b.mlPick.confidence - a.mlPick.confidence
+  )[0].mlPick;
+  const spreadLock = picks
+    .filter((p) => p.spreadPick)
+    .sort((a, b) => b.spreadPick.confidence - a.spreadPick.confidence)[0]
+    .spreadPick;
 
   const featured = {
     date: getEasternDateString(),
     moneylineLock,
     spreadLock,
-    propLock,
+    propLock: { player: "No props available", confidence: 0 },
     picks,
   };
 
@@ -185,13 +190,14 @@ async function generateAndSaveTodayPicks() {
   fs.writeFileSync(DAILY_FILE, JSON.stringify(featured, null, 2));
   history.unshift(featured);
   fs.writeFileSync(HISTORY_LOG, JSON.stringify(history, null, 2));
-  console.log(`📆 Locked in today's picks for ${todayDate}`);
+  console.log(`📆 Locked in picks for ${todayDate}`);
+  return featured;
 }
 
 // =======================
-// 🧾 RECORD TRACKER (auto after games end)
+// 🏆 RECORD TRACKING
 // =======================
-async function updateRecordIfNeeded() {
+async function updateRecord() {
   try {
     const { data } = await axios.get(
       "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/scores",
@@ -204,8 +210,7 @@ async function updateRecordIfNeeded() {
     (data || []).forEach((game) => {
       if (game.completed && game.scores && todayPicks?.picks) {
         const pick = todayPicks.picks.find(
-          (p) =>
-            p.matchup === `${game.away_team} @ ${game.home_team}`
+          (p) => p.matchup === `${game.away_team} @ ${game.home_team}`
         );
         if (pick) {
           const homeScore = parseInt(
@@ -227,7 +232,7 @@ async function updateRecordIfNeeded() {
     fs.writeFileSync(RESULT_LOG, JSON.stringify(record, null, 2));
     console.log(`🏆 Updated record: ${wins}-${losses} (${record.winRate}%)`);
   } catch (err) {
-    console.warn("Record update failed:", err.message);
+    console.warn("⚠️ Record update failed:", err.message);
   }
 }
 
@@ -239,7 +244,7 @@ app.get("/api/featured", async (req, res) => {
   if (todayDate !== currentDate || !todayPicks) {
     await generateAndSaveTodayPicks();
   }
-  await updateRecordIfNeeded();
+  await updateRecord();
   res.json(todayPicks);
 });
 
@@ -253,21 +258,8 @@ app.get("/api/picks", async (req, res) => {
 
 app.get("/api/record", (req, res) => res.json(record));
 
-app.get("/api/scores", async (req, res) => {
-  try {
-    const { data } = await axios.get(
-      "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/scores",
-      { params: { apiKey: ODDS_API_KEY, daysFrom: 2 } }
-    );
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get("/api/history", (req, res) => res.json(history));
 app.get("/", (req, res) =>
-  res.send("LockBox AI ✅ Stable v14 — Daily Locks + Real Record Tracking")
+  res.send("LockBox AI ✅ v15 — Today's Slate Only + Daily Locks")
 );
 
 // =======================
@@ -275,5 +267,5 @@ app.get("/", (req, res) =>
 // =======================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () =>
-  console.log(`✅ LockBox AI v14 running on port ${PORT}`)
+  console.log(`✅ LockBox AI v15 running on port ${PORT}`)
 );

@@ -9,18 +9,6 @@ dotenv.config();
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-app.use(
-  cors({
-    origin: [
-      "https://lockbox-frontend.onrender.com",
-      "http://localhost:3000",
-    ],
-    methods: ["GET", "POST"],
-    credentials: true,
-  })
-);
-app.use(express.json());
-
 // =======================
 // ⚙️ CONFIG
 // =======================
@@ -37,6 +25,9 @@ let history = [];
 let todayPicks = null;
 let todayDate = null;
 
+// =======================
+// 📁 LOAD SAVED FILES
+// =======================
 if (fs.existsSync(RESULT_LOG))
   record = JSON.parse(fs.readFileSync(RESULT_LOG));
 if (fs.existsSync(HISTORY_LOG))
@@ -48,7 +39,7 @@ if (fs.existsSync(DAILY_FILE)) {
 }
 
 // =======================
-// 🧠 HELPERS
+// 🧮 HELPERS
 // =======================
 const impliedProb = (ml) =>
   ml < 0 ? (-ml) / ((-ml) + 100) : 100 / (ml + 100);
@@ -69,31 +60,11 @@ function getEasternDateString(date = new Date()) {
 }
 
 // =======================
-// 🏈 FETCH ACTIVE GAMES
+// 🏈 FETCH UPCOMING GAMES (PRE-KICKOFF)
 // =======================
-async function fetchActiveNFLGames() {
+async function fetchPreGameNFL() {
   try {
-    const { data: scores } = await axios.get(
-      `https://api.the-odds-api.com/v4/sports/${SPORT}/scores`,
-      {
-        params: { apiKey: ODDS_API_KEY, daysFrom: 1 },
-      }
-    );
-
-    const now = new Date();
-    const todayEST = getEasternDateString(now);
-
-    const activeGames = scores.filter((g) => {
-      const gameDate = getEasternDateString(new Date(g.commence_time));
-      return gameDate === todayEST && (!g.completed || !g.scores);
-    });
-
-    console.log(`🏈 Found ${activeGames.length} active NFL games`);
-
-    if (!activeGames.length) return [];
-
-    // Get odds only for these active games
-    const { data: odds } = await axios.get(
+    const { data } = await axios.get(
       `https://api.the-odds-api.com/v4/sports/${SPORT}/odds`,
       {
         params: {
@@ -106,24 +77,22 @@ async function fetchActiveNFLGames() {
       }
     );
 
-    const filteredOdds = odds.filter((o) =>
-      activeGames.some(
-        (a) =>
-          a.home_team === o.home_team &&
-          a.away_team === o.away_team
-      )
-    );
+    const now = new Date();
+    const soonGames = (data || []).filter((g) => {
+      const kickoff = new Date(g.commence_time);
+      return kickoff > now && (kickoff - now) / 1000 / 60 < 60 * 24; // next 24h only
+    });
 
-    console.log(`📊 Pulled odds for ${filteredOdds.length} active games`);
-    return filteredOdds;
+    console.log(`🏈 Found ${soonGames.length} upcoming NFL games`);
+    return soonGames;
   } catch (err) {
-    console.error("❌ fetchActiveNFLGames failed:", err.message);
+    console.error("❌ fetchPreGameNFL failed:", err.message);
     return [];
   }
 }
 
 // =======================
-// 🤖 AI PICK LOGIC
+// 🧠 GENERATE PICKS
 // =======================
 function generateAIGamePicks(games) {
   return games
@@ -178,8 +147,8 @@ async function updateRecord() {
     let losses = record.losses;
 
     (data || []).forEach((game) => {
-      if (game.completed && game.scores && todayPicks?.picks) {
-        const pick = todayPicks.picks.find(
+      if (game.completed && game.scores && todayPicks) {
+        const pick = todayPicks.find(
           (p) => p.matchup === `${game.away_team} @ ${game.home_team}`
         );
         if (pick) {
@@ -200,45 +169,49 @@ async function updateRecord() {
     record.losses = losses;
     record.winRate = ((wins / (wins + losses || 1)) * 100).toFixed(1);
     fs.writeFileSync(RESULT_LOG, JSON.stringify(record, null, 2));
-    console.log(`🏆 Updated record: ${wins}-${losses} (${record.winRate}%)`);
+    console.log(`🏆 Record updated: ${wins}-${losses} (${record.winRate}%)`);
   } catch (err) {
     console.warn("⚠️ Record update failed:", err.message);
   }
 }
 
 // =======================
-// 🎯 FEATURED PICKS (LOCKBOX)
+// 📅 DAILY LOCK-IN
 // =======================
-async function generateAndSaveTodayPicks() {
-  const games = await fetchActiveNFLGames();
+async function lockInTodayPicks() {
+  const currentDate = getEasternDateString();
+  if (todayDate === currentDate && todayPicks) return todayPicks;
+
+  const games = await fetchPreGameNFL();
   if (!games.length) {
-    console.log("⚠️ No active games — skipping lock-in.");
+    console.log("⚠️ No upcoming games found for today.");
     return null;
   }
 
   const picks = generateAIGamePicks(games);
-  const moneylineLock = picks.sort(
-    (a, b) => b.mlPick.confidence - a.mlPick.confidence
-  )[0].mlPick;
+
+  const moneylineLock = picks
+    .slice()
+    .sort((a, b) => b.mlPick.confidence - a.mlPick.confidence)[0].mlPick;
   const spreadLock = picks
     .filter((p) => p.spreadPick)
     .sort((a, b) => b.spreadPick.confidence - a.spreadPick.confidence)[0]
     .spreadPick;
 
   const featured = {
-    date: getEasternDateString(),
+    date: currentDate,
     moneylineLock,
     spreadLock,
     propLock: { player: "No props available", confidence: 0 },
     picks,
   };
 
-  todayDate = featured.date;
-  todayPicks = featured;
-  fs.writeFileSync(DAILY_FILE, JSON.stringify(featured, null, 2));
+  todayDate = currentDate;
+  todayPicks = picks;
+  fs.writeFileSync(DAILY_FILE, JSON.stringify({ date: currentDate, picks }, null, 2));
   history.unshift(featured);
   fs.writeFileSync(HISTORY_LOG, JSON.stringify(history, null, 2));
-  console.log(`📆 Locked in picks for ${todayDate}`);
+  console.log(`✅ Locked in ${picks.length} games for ${currentDate}`);
   return featured;
 }
 
@@ -246,26 +219,20 @@ async function generateAndSaveTodayPicks() {
 // 🚀 ROUTES
 // =======================
 app.get("/api/featured", async (req, res) => {
-  const currentDate = getEasternDateString();
-  if (todayDate !== currentDate || !todayPicks) {
-    await generateAndSaveTodayPicks();
-  }
+  const data = await lockInTodayPicks();
   await updateRecord();
-  res.json(todayPicks);
+  res.json(data);
 });
 
 app.get("/api/picks", async (req, res) => {
-  const currentDate = getEasternDateString();
-  if (todayDate !== currentDate || !todayPicks) {
-    await generateAndSaveTodayPicks();
-  }
-  res.json(todayPicks.picks);
+  const data = await lockInTodayPicks();
+  res.json(data?.picks || []);
 });
 
 app.get("/api/record", (req, res) => res.json(record));
 
 app.get("/", (req, res) =>
-  res.send("✅ LockBox AI v17 — Active Games + Live Record Tracker")
+  res.send("✅ LockBox AI v18 — Pre-Game Locks + Live Record Tracker")
 );
 
 // =======================
@@ -273,5 +240,5 @@ app.get("/", (req, res) =>
 // =======================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () =>
-  console.log(`✅ LockBox AI v17 running on port ${PORT}`)
+  console.log(`✅ LockBox AI v18 running on port ${PORT}`)
 );

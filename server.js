@@ -236,7 +236,7 @@ app.get("/", (req, res) =>
 // =======================
 // 🖥️ START SERVER
 // =======================
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT;
 app.listen(PORT, () =>
   console.log(`✅ LockBox AI v19 running on port ${PORT}`)
 );

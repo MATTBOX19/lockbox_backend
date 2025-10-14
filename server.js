@@ -53,6 +53,7 @@ app.get("/api/debug/props-raw", async (req, res) => {
       sample: (data || []).slice(0, 3).map((g) => ({
         matchup: `${g.away_team} @ ${g.home_team}`,
         bookmaker: g.bookmakers?.[0]?.title || "none",
+        commence_time: g.commence_time,
       })),
     });
   } catch (err) {
@@ -90,6 +91,11 @@ if (fs.existsSync(HISTORY_LOG))
 const impliedProb = (ml) =>
   ml < 0 ? (-ml) / ((-ml) + 100) : 100 / (ml + 100);
 
+/**
+ * Fetch odds and keep ONLY pre-game markets.
+ * We explicitly drop anything whose commence_time <= now
+ * so no in-progress/live lines can influence picks.
+ */
 async function fetchOdds() {
   const fresh = oddsCache.data && Date.now() - oddsCache.ts < ODDS_CACHE_MS;
   if (fresh) return oddsCache.data;
@@ -109,35 +115,24 @@ async function fetchOdds() {
     if (!Array.isArray(res.data)) throw new Error("Invalid odds response");
 
     const now = new Date();
-    const startWindow = new Date(now);
-    startWindow.setDate(startWindow.getDate() - 1);
-    const endWindow = new Date(now);
-    endWindow.setDate(endWindow.getDate() + 1);
 
-    const filteredGames = res.data.filter((g) => {
-      const gameDate = new Date(g.commence_time);
-      return (
-        (gameDate >= startWindow && gameDate <= endWindow) ||
-        g.completed === false
-      );
-    });
+    // ✅ Only keep games that have NOT started yet
+    const pregameOnly = res.data.filter((g) => new Date(g.commence_time) > now);
 
-    filteredGames.sort(
+    // Sort upcoming by start time (soonest first)
+    pregameOnly.sort(
       (a, b) => new Date(a.commence_time) - new Date(b.commence_time)
     );
 
-    oddsCache = { data: filteredGames, ts: Date.now() };
-    console.log(`📊 Pulled ${filteredGames.length} NFL games (within ±1 day window)`);
-    return filteredGames;
+    oddsCache = { data: pregameOnly, ts: Date.now() };
+    console.log(`📊 Pulled ${pregameOnly.length} NFL pre-game matchups`);
+    return pregameOnly;
   } catch (err) {
     console.error("❌ fetchOdds failed:", err.message);
     return [];
   }
 }
 
-// =======================
-// 🧠 AI GAME PICKS
-// =======================
 function calculateConfidence(homeOdds, awayOdds, lineType) {
   const toProb = (odds) =>
     odds > 0 ? 100 / (odds + 100) : Math.abs(odds) / (Math.abs(odds) + 100);
@@ -151,6 +146,13 @@ function calculateConfidence(homeOdds, awayOdds, lineType) {
   return Math.round(50 + Math.random() * 25);
 }
 
+/**
+ * ML + ATS logic with alignment:
+ * - Choose ML favorite via implied probability.
+ * - For spread, prefer the same side when the favorite has a negative line
+ *   (or the dog has the positive line). If a book flips presentation,
+ *   we still anchor to favorite vs dog based on ML and compare their lines.
+ */
 async function generateAIGamePicks(games) {
   if (!Array.isArray(games)) return [];
 
@@ -166,11 +168,7 @@ async function generateAIGamePicks(games) {
 
       const homeML = h2h?.outcomes?.find((o) => o.name === home)?.price;
       const awayML = h2h?.outcomes?.find((o) => o.name === away)?.price;
-
       if (!homeML || !awayML) return null;
-
-      const homeSpread = spread?.outcomes?.find((o) => o.name === home);
-      const awaySpread = spread?.outcomes?.find((o) => o.name === away);
 
       const mlConfidence = calculateConfidence(homeML, awayML, "moneyline");
       const mlPickTeam =
@@ -184,29 +182,35 @@ async function generateAIGamePicks(games) {
         awayML,
       };
 
-      // 🧠 Smarter Spread logic (ATS direction check)
       let spreadPick = null;
+
+      const homeSpread = spread?.outcomes?.find((o) => o.name === home);
+      const awaySpread = spread?.outcomes?.find((o) => o.name === away);
+
       if (homeSpread && awaySpread) {
         const homeLine = parseFloat(homeSpread.point);
         const awayLine = parseFloat(awaySpread.point);
         const homePrice = homeSpread.price;
         const awayPrice = awaySpread.price;
 
-        // pick team with better line advantage AND aligns with ML favorite
+        // Define favorite/underdog by ML, then align with ATS direction
         const favorite = mlPickTeam;
         const underdog = favorite === home ? away : home;
 
-        const favoriteLine =
-          favorite === home ? homeLine : awayLine;
-        const underdogLine =
-          favorite === home ? awayLine : homeLine;
+        const favoriteLine = favorite === home ? homeLine : awayLine;
+        const underdogLine = favorite === home ? awayLine : homeLine;
 
+        // If favorite has a negative spread, that aligns. If not, prefer dog.
         const sameSide =
           (favorite === home && favoriteLine < 0) ||
-          (favorite === away && favoriteLine > 0);
+          (favorite === away && favoriteLine < 0);
 
         const chosenTeam = sameSide ? favorite : underdog;
-        const spreadConfidence = calculateConfidence(homePrice, awayPrice, "spread");
+        const spreadConfidence = calculateConfidence(
+          homePrice,
+          awayPrice,
+          "spread"
+        );
 
         spreadPick = {
           type: "spread",
@@ -286,10 +290,11 @@ app.get("/api/scores", async (req, res) => {
     const url = `https://api.the-odds-api.com/v4/sports/americanfootball_nfl/scores`;
     const params = {
       apiKey: process.env.ODDS_API_KEY,
-      daysFrom: 2,
+      daysFrom: 2, // live + recent
     };
 
     const { data } = await axios.get(url, { params });
+
     const scores = (data || []).map((g) => ({
       id: g.id,
       sport_key: g.sport_key,
@@ -337,15 +342,13 @@ app.get("/api/featured", async (req, res) => {
     const gamePicks = await generateAIGamePicks(games);
     const props = await generateAIPropPicks();
 
-    const moneylineLock = gamePicks
-      ?.map((g) => g.mlPick)
-      ?.filter(Boolean)
-      ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
+    const moneylineLock =
+      gamePicks?.map((g) => g.mlPick)?.filter(Boolean)
+        ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
 
-    const spreadLock = gamePicks
-      ?.map((g) => g.spreadPick)
-      ?.filter(Boolean)
-      ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
+    const spreadLock =
+      gamePicks?.map((g) => g.spreadPick)?.filter(Boolean)
+        ?.sort((a, b) => b.confidence - a.confidence)[0] || null;
 
     const propLock =
       props.length > 0
@@ -374,12 +377,12 @@ app.get("/api/featured", async (req, res) => {
 
 app.get("/api/record", (req, res) => res.json(record));
 app.get("/api/history", (req, res) => res.json(history));
-app.get("/", (req, res) => res.send("LockBox AI ✅ Stable v11 Running"));
+app.get("/", (req, res) => res.send("LockBox AI ✅ Stable v12 (pregame only)"));
 
 // =======================
 // 🖥️ START SERVER
 // =======================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () =>
-  console.log(`✅ LockBox AI v11 running on port ${PORT}`)
+  console.log(`✅ LockBox AI v12 running on port ${PORT}`)
 );

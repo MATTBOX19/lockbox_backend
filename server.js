@@ -6,6 +6,9 @@ import dotenv from "dotenv";
 dotenv.config();
 const app = express();
 
+// =======================
+// ⚙️ MIDDLEWARE
+// =======================
 app.use(
   cors({
     origin: ["https://lockbox-frontend.onrender.com", "http://localhost:3000"],
@@ -13,7 +16,6 @@ app.use(
     credentials: true,
   })
 );
-
 app.use(express.json());
 
 // =======================
@@ -46,6 +48,20 @@ function calculateConfidence(homeOdds, awayOdds) {
   return Math.round(50 + diff * 100);
 }
 
+function selectBestPick(moneyline, spread) {
+  const mlConf = moneyline?.confidence || 0;
+  const spConf = spread?.confidence || 0;
+  const margin = 3; // spread must beat ML by 3 pts minimum
+
+  if (spConf > mlConf + margin) {
+    return { type: "Spread", pick: spread.pick, confidence: spConf };
+  }
+  return { type: "Moneyline", pick: moneyline.pick, confidence: mlConf };
+}
+
+// =======================
+// 🧠 AI PICK GENERATOR
+// =======================
 async function fetchOdds(sportKey) {
   try {
     const url = `https://api.the-odds-api.com/v4/sports/${sportKey}/odds`;
@@ -78,40 +94,53 @@ function generateAIPicks(games) {
       const h2h = markets.find((m) => m.key === "h2h");
       const spread = markets.find((m) => m.key === "spreads");
 
-      const homeML = h2h?.outcomes?.find((o) => o.name === home)?.price;
-      const awayML = h2h?.outcomes?.find((o) => o.name === away)?.price;
+      // skip invalid games
+      if (!h2h || !h2h.outcomes) return null;
+
+      // MONEYLINE logic
+      const homeML = h2h.outcomes.find((o) => o.name === home)?.price;
+      const awayML = h2h.outcomes.find((o) => o.name === away)?.price;
       if (!homeML || !awayML) return null;
 
       const mlConfidence = calculateConfidence(homeML, awayML);
       const mlPick =
         impliedProb(homeML) > impliedProb(awayML) ? home : away;
 
-      const homeSpread = spread?.outcomes?.find((o) => o.name === home);
-      const awaySpread = spread?.outcomes?.find((o) => o.name === away);
+      // SPREAD logic with discount (so it's not always higher)
       let spreadPick = null;
+      let spreadConfidence = 0;
 
-      if (homeSpread && awaySpread) {
-        const spreadConfidence = calculateConfidence(
-          homeSpread.price,
-          awaySpread.price
-        );
-        spreadPick =
-          Math.abs(homeSpread.price) < Math.abs(awaySpread.price)
-            ? home
-            : away;
-        return {
-          matchup: `${away} @ ${home}`,
-          bookmaker,
-          moneyline: { pick: mlPick, confidence: mlConfidence },
-          spread: { pick: spreadPick, confidence: spreadConfidence },
-        };
+      if (spread && spread.outcomes) {
+        const homeSpread = spread.outcomes.find((o) => o.name === home);
+        const awaySpread = spread.outcomes.find((o) => o.name === away);
+
+        if (homeSpread && awaySpread) {
+          spreadConfidence =
+            Math.max(
+              calculateConfidence(homeSpread.price, awaySpread.price) - 10,
+              40
+            ); // reduce spread confidence realism
+          spreadPick =
+            Math.abs(homeSpread.price) < Math.abs(awaySpread.price)
+              ? home
+              : away;
+        }
       }
+
+      const moneyline = { pick: mlPick, confidence: mlConfidence };
+      const spreadObj = {
+        pick: spreadPick || "N/A",
+        confidence: spreadConfidence,
+      };
+
+      const best = selectBestPick(moneyline, spreadObj);
 
       return {
         matchup: `${away} @ ${home}`,
         bookmaker,
-        moneyline: { pick: mlPick, confidence: mlConfidence },
-        spread: null,
+        moneyline,
+        spread: spreadObj,
+        bestPick: best,
       };
     })
     .filter(Boolean);
@@ -120,8 +149,6 @@ function generateAIPicks(games) {
 // =======================
 // 🏈 API ROUTES
 // =======================
-
-// Generic route to fetch picks for any sport
 app.get("/api/picks/:sport", async (req, res) => {
   const sportParam = req.params.sport.toLowerCase();
   const sportKey = SPORTS[sportParam];
@@ -133,11 +160,12 @@ app.get("/api/picks/:sport", async (req, res) => {
     const picks = generateAIPicks(games);
     res.json({ sport: sportParam.toUpperCase(), picks });
   } catch (err) {
+    console.error("❌ /api/picks error:", err.message);
     res.status(500).json({ error: "Failed to fetch AI picks." });
   }
 });
 
-// Scores route
+// SCORES
 app.get("/api/scores", async (req, res) => {
   try {
     const url = `https://api.the-odds-api.com/v4/sports/americanfootball_nfl/scores`;
@@ -158,11 +186,15 @@ app.get("/api/scores", async (req, res) => {
   }
 });
 
+// HEALTH CHECK
 app.get("/", (req, res) =>
-  res.send("🏈 LockBox AI v21 — Multi-Sport Backend Active")
+  res.send("🏈 LockBox AI v23 — Multi-Sport Backend with Balanced Confidence Active")
 );
 
+// =======================
+// 🚀 START SERVER
+// =======================
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () =>
-  console.log(`✅ LockBox AI v21 running on port ${PORT}`)
+  console.log(`✅ LockBox AI v23 running on port ${PORT}`)
 );
